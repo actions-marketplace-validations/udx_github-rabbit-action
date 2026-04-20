@@ -1,0 +1,812 @@
+name: "Rabbit Automation Action"
+description: "Declare cloud infrastructure in YAML. Deploy to AWS, GCP, and Kubernetes with git push."
+author: "UDX"
+
+branding:
+  icon: "cloud"
+  color: "orange"
+
+inputs:
+  # Required
+  project_id:
+    description: "GCP project ID for Terraform state and resource operations"
+    required: true
+  gcp_auth_provider:
+    description: "GCP Workload Identity Federation provider resource name"
+    required: true
+  gcp_service_account:
+    description: "GCP service account email for Workload Identity"
+    required: true
+
+  # Auth
+  aws_role_arn:
+    description: "AWS IAM OIDC role ARN for Route53, CloudFront, WAF, ACM"
+    required: false
+  aws_region:
+    description: "AWS region"
+    required: false
+
+  # Docker
+  dockerhub_username:
+    description: "Docker Hub username for pulling R2A image"
+    required: false
+  dockerhub_token:
+    description: "Docker Hub token for pulling R2A image (avoids rate limits)"
+    required: false
+  dockerhub_helm_token:
+    description: "Docker Hub token for Helm OCI registry auth inside R2A container (falls back to dockerhub_token)"
+    required: false
+  r2a_version:
+    description: "R2A Docker image tag (default: latest)"
+    required: false
+    default: "latest"
+
+  # Deployment
+  terraform_action:
+    description: "Terraform action: apply or destroy (default: apply; auto-set to destroy on branch delete)"
+    required: false
+    default: "apply"
+  plan_only:
+    description: "Override plan mode (auto-detected: PRs and schedules → true, pushes → false)"
+    required: false
+  environment:
+    description: "Override environment name (auto-detected from branch name)"
+    required: false
+  print_config:
+    description: "Print merged config in logs for debugging (true/false)"
+    required: false
+    default: "true"
+  multi_repo:
+    description: "Enable per-repo Terraform state isolation (true/false)"
+    required: false
+    default: "false"
+  shared_project:
+    description: "Shared GCP project for cross-project K8s cluster access"
+    required: false
+
+  # Kubernetes
+  k8s_cluster_name:
+    description: "GKE cluster name for kubeconfig setup"
+    required: false
+
+  # Monitoring
+  newrelic_account_id:
+    description: "New Relic account ID (passed as TF_VAR_newrelic_account_id)"
+    required: false
+  newrelic_api_key:
+    description: "New Relic API key (passed as TF_VAR_newrelic_api_key)"
+    required: false
+
+  # Notifications
+  slack_webhook:
+    description: "Slack incoming webhook URL for deployment notifications"
+    required: false
+
+  # Config
+  source_dir:
+    description: "Source directory for .rabbit configs"
+    required: false
+    default: ".rabbit"
+  github_token:
+    description: "GitHub token for branch protection detection and PR comments"
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  environment:
+    description: "Resolved environment name"
+    value: ${{ steps.resolve-env.outputs.environment }}
+  lifecycle:
+    description: "Resolved lifecycle (production, staging, development)"
+    value: ${{ steps.merge-configs.outputs.lifecycle }}
+  plan_only:
+    description: "Whether the run was plan-only"
+    value: ${{ steps.plan-mode.outputs.plan_only }}
+  terraform_action:
+    description: "Terraform action that was executed (apply, destroy, skip)"
+    value: ${{ steps.terraform-action.outputs.terraform_action }}
+  has_changes:
+    description: "Whether Terraform detected changes"
+    value: ${{ steps.plan-summary.outputs.has_changes }}
+  changes_msg:
+    description: "Summary of changes (e.g. Add: 2, Change: 1, Destroy: 0)"
+    value: ${{ steps.plan-summary.outputs.changes_msg }}
+  cloudfront_distribution_id:
+    description: "CloudFront distribution ID from Terraform outputs"
+    value: ${{ steps.terraform.outputs.aws_cloudfront_distribution_id }}
+  k8s_namespace:
+    description: "Kubernetes namespace derived from repository name"
+    value: ${{ steps.deployment-metadata.outputs.k8s_namespace }}
+  config_path:
+    description: "Path to the merged config file"
+    value: ${{ steps.merge-configs.outputs.merged_config }}
+
+runs:
+  using: "composite"
+  steps:
+    # =========================================================================
+    # 1. Install yq
+    # =========================================================================
+    - name: Install yq
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v yq >/dev/null 2>&1; then
+          echo "Installing yq..."
+          curl -sSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" -o /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
+        fi
+        yq --version
+
+    # =========================================================================
+    # 2. Merge infrastructure configs
+    # =========================================================================
+    - name: Merge infrastructure configs
+      id: merge-configs
+      shell: bash
+      env:
+        INPUT_SOURCE_DIR: ${{ inputs.source_dir }}
+        INPUT_ENV_NAME: ${{ inputs.environment || (github.event_name == 'pull_request' && github.base_ref) || (github.event_name == 'delete' && github.event.ref) || github.ref_name }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        INPUT_EXCLUDE: "**/merged*.yml,**/merged*.yaml"
+        INPUT_RECURSIVE: "true"
+        INPUT_FILE_PATTERNS: "*.yml,*.yaml"
+        INPUT_OUTPUT_FORMAT: "yaml"
+        ENABLE_ANNOTATIONS: "false"
+        ENABLE_SUMMARY: "false"
+        INPUT_DEBUG: "false"
+      run: |
+        set -euo pipefail
+        bash "${GITHUB_ACTION_PATH}/bin/merge-configs.sh"
+
+    # =========================================================================
+    # 3. Resolve environment
+    # =========================================================================
+    - name: Resolve environment
+      id: resolve-env
+      shell: bash
+      env:
+        MERGED_ENV: ${{ steps.merge-configs.outputs.environment }}
+        MERGED_LIFECYCLE: ${{ steps.merge-configs.outputs.lifecycle }}
+        MERGED_CONFIG_PATH: ${{ steps.merge-configs.outputs.merged_config }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_REF_TYPE: ${{ github.event.ref_type }}
+        REQUESTED_ENV: ${{ inputs.environment || (github.event_name == 'pull_request' && github.base_ref) || (github.event_name == 'delete' && github.event.ref) || github.ref_name }}
+      run: |
+        set -euo pipefail
+        environment="$MERGED_ENV"
+        lifecycle="$MERGED_LIFECYCLE"
+
+        if [[ "$EVENT_NAME" == "delete" && "$EVENT_REF_TYPE" == "branch" && -n "$REQUESTED_ENV" && "$environment" != "$REQUESTED_ENV" ]]; then
+          echo "::error title=❌ Environment Resolution Mismatch::Delete requested '$REQUESTED_ENV' but resolved '$environment'. Aborting to prevent wrong-environment destroy."
+          exit 1
+        fi
+
+        echo "environment=$environment" >> "$GITHUB_OUTPUT"
+        echo "lifecycle=$lifecycle" >> "$GITHUB_OUTPUT"
+        echo "config_path=$MERGED_CONFIG_PATH" >> "$GITHUB_OUTPUT"
+
+        echo "Resolved environment: $environment"
+        echo "Resolved lifecycle: $lifecycle"
+        echo "Config path: $MERGED_CONFIG_PATH"
+
+    # =========================================================================
+    # 4. Determine plan mode
+    # =========================================================================
+    - name: Determine plan mode
+      id: plan-mode
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        INPUT_PLAN_ONLY: ${{ inputs.plan_only }}
+        DISPATCH_PLAN_ONLY: ${{ github.event.inputs.plan_only }}
+      run: |
+        set -euo pipefail
+
+        # Explicit input overrides everything
+        if [[ -n "$INPUT_PLAN_ONLY" ]]; then
+          echo "plan_only=$INPUT_PLAN_ONLY" >> "$GITHUB_OUTPUT"
+          echo "Plan mode from input: $INPUT_PLAN_ONLY"
+          exit 0
+        fi
+
+        # Auto-detect from event
+        if [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "schedule" ]]; then
+          echo "plan_only=true" >> "$GITHUB_OUTPUT"
+          echo "Plan-only mode enabled for trigger: $EVENT_NAME"
+        elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+          echo "plan_only=${DISPATCH_PLAN_ONLY:-true}" >> "$GITHUB_OUTPUT"
+          echo "Plan mode for manual run: ${DISPATCH_PLAN_ONLY:-true}"
+        else
+          echo "plan_only=false" >> "$GITHUB_OUTPUT"
+          echo "Apply mode enabled for trigger: $EVENT_NAME"
+        fi
+
+    # =========================================================================
+    # 5. Determine terraform action
+    # =========================================================================
+    - name: Determine terraform action
+      id: terraform-action
+      shell: bash
+      env:
+        INPUT_TERRAFORM_ACTION: ${{ inputs.terraform_action }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_REF_TYPE: ${{ github.event.ref_type }}
+      run: |
+        set -euo pipefail
+        terraform_action="$INPUT_TERRAFORM_ACTION"
+
+        if [[ -z "$terraform_action" ]]; then
+          terraform_action="apply"
+        fi
+
+        if [[ "$EVENT_NAME" == "delete" ]]; then
+          if [[ "$EVENT_REF_TYPE" == "branch" ]]; then
+            terraform_action="destroy"
+          else
+            terraform_action="skip"
+            echo "Delete event for ref type '$EVENT_REF_TYPE' is ignored"
+          fi
+        fi
+
+        echo "terraform_action=$terraform_action" >> "$GITHUB_OUTPUT"
+        echo "Terraform action: $terraform_action"
+
+    # =========================================================================
+    # 6. Safety checks
+    # =========================================================================
+    - name: Safety checks
+      id: safety
+      shell: bash
+      env:
+        LIFECYCLE: ${{ steps.resolve-env.outputs.lifecycle }}
+        PLAN_ONLY: ${{ steps.plan-mode.outputs.plan_only }}
+        TERRAFORM_ACTION: ${{ steps.terraform-action.outputs.terraform_action }}
+        EVENT_NAME: ${{ github.event_name }}
+      run: |
+        set -euo pipefail
+
+        if [[ "$TERRAFORM_ACTION" == "skip" ]]; then
+          echo "No deployment action required for this event"
+          echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Block manual apply to production
+        if [[ "$EVENT_NAME" == "workflow_dispatch" && "$LIFECYCLE" == "production" && "$PLAN_ONLY" == "false" ]]; then
+          echo "::error title=❌ Safety Check Failed::Manual apply to production is blocked"
+          echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        # Block production destroy
+        if [[ "$LIFECYCLE" == "production" && "$TERRAFORM_ACTION" == "destroy" ]]; then
+          echo "::error title=❌ Safety Check Failed::Destroy action is blocked for production lifecycle"
+          echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+    # =========================================================================
+    # 7. Resolve deployment metadata
+    # =========================================================================
+    - name: Resolve deployment metadata
+      id: deployment-metadata
+      if: steps.safety.outputs.should_deploy == 'true'
+      shell: bash
+      env:
+        REPOSITORY_NAME: ${{ github.event.repository.name }}
+      run: |
+        set -euo pipefail
+        namespace="$REPOSITORY_NAME"
+        namespace="${namespace//./-}"
+        echo "k8s_namespace=$namespace" >> "$GITHUB_OUTPUT"
+        echo "K8s namespace: $namespace"
+
+    # =========================================================================
+    # 8. Detect config services for summary
+    # =========================================================================
+    - name: Detect configured services
+      id: detect-services
+      if: steps.safety.outputs.should_deploy == 'true'
+      shell: bash
+      env:
+        CONFIG_PATH: ${{ steps.resolve-env.outputs.config_path }}
+        ENV_NAME: ${{ steps.resolve-env.outputs.environment }}
+      run: |
+        set -euo pipefail
+        detected_configs="$(
+          while IFS=$'\t' read -r module label; do
+            module="$(printf '%s' "$module" | sed 's/^ *//; s/ *$//')"
+            label="$(printf '%s' "$label" | sed 's/^ *//; s/ *$//')"
+            if [[ -n "$module" && -n "$label" && "$module" != "$label" ]]; then
+              printf '%s/%s\n' "$module" "$label"
+            elif [[ -n "$label" ]]; then
+              printf '%s\n' "$label"
+            elif [[ -n "$module" ]]; then
+              printf '%s\n' "$module"
+            fi
+          done < <(
+            yq -r '
+              .services[]? |
+              [
+                (.module // .service // .kind // .type // ""),
+                (.id // .name // .service // .path // .kind // .type // "")
+              ] |
+              @tsv
+            ' "$CONFIG_PATH" 2>/dev/null || true
+          ) | awk 'NF && !seen[$0]++ { items[++count] = $0 } END { for (i = 1; i <= count; i++) printf "%s%s", items[i], (i < count ? ", " : "") }'
+        )"
+
+        if [[ -z "$detected_configs" ]]; then
+          detected_configs="none"
+        fi
+        echo "detected_configs=$detected_configs" >> "$GITHUB_OUTPUT"
+
+    # =========================================================================
+    # 9. Write configuration summary
+    # =========================================================================
+    - name: Write configuration summary
+      if: always()
+      shell: bash
+      env:
+        ENV_NAME: ${{ steps.resolve-env.outputs.environment }}
+        LIFECYCLE: ${{ steps.resolve-env.outputs.lifecycle }}
+        CONFIG_PATH: ${{ steps.resolve-env.outputs.config_path }}
+        PLAN_ONLY: ${{ steps.plan-mode.outputs.plan_only }}
+        TERRAFORM_ACTION: ${{ steps.terraform-action.outputs.terraform_action }}
+        SHOULD_DEPLOY: ${{ steps.safety.outputs.should_deploy }}
+        DETECTED_CONFIGS: ${{ steps.detect-services.outputs.detected_configs }}
+        TRIGGER: ${{ github.event_name }}
+        R2A_VERSION: ${{ inputs.r2a_version }}
+        MULTI_REPO: ${{ inputs.multi_repo }}
+        HAS_AWS: ${{ inputs.aws_role_arn != '' && inputs.aws_region != '' }}
+      run: |
+        config_items="$(printf '%s' "${DETECTED_CONFIGS:-none}" | sed "s/#{Environment}/$ENV_NAME/g" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | sed '/^$/d')"
+
+        {
+          echo "## Configuration Summary"
+          echo ""
+          echo "| Environment | Action | Deploy | Trigger |"
+          echo "| --- | --- | --- | --- |"
+          echo "| \`${ENV_NAME:-unknown}\` | \`${TERRAFORM_ACTION:-apply}\` | \`${SHOULD_DEPLOY:-false}\` | \`${TRIGGER}\` |"
+          echo ""
+          echo "### Scope"
+          echo ""
+          echo "| Field | Value |"
+          echo "| --- | --- |"
+          echo "| Lifecycle | \`${LIFECYCLE:-unknown}\` |"
+          echo "| Plan Only | \`${PLAN_ONLY:-true}\` |"
+          echo "| Multi Repo | \`${MULTI_REPO:-false}\` |"
+          echo "| AWS Enabled | \`${HAS_AWS}\` |"
+          echo ""
+          echo "### Detected Configs"
+          echo ""
+          if [ -n "$config_items" ]; then
+            while IFS= read -r item; do
+              echo "- \`$item\`"
+            done <<< "$config_items"
+          else
+            echo "- none"
+          fi
+          echo ""
+          echo "### Runtime"
+          echo ""
+          echo "| Field | Value |"
+          echo "| --- | --- |"
+          echo "| Project ID | \`${{ inputs.project_id }}\` |"
+          echo "| R2A Version | \`${R2A_VERSION}\` |"
+          echo "| Config Path | \`${CONFIG_PATH:-n/a}\` |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # =========================================================================
+    # 10. Authenticate with Google Cloud
+    # =========================================================================
+    - name: Authenticate with Google Cloud
+      id: gcp-auth
+      if: steps.safety.outputs.should_deploy == 'true'
+      uses: google-github-actions/auth@v3
+      with:
+        workload_identity_provider: ${{ inputs.gcp_auth_provider }}
+        service_account: ${{ inputs.gcp_service_account }}
+
+    # =========================================================================
+    # 11. Configure AWS credentials (optional)
+    # =========================================================================
+    - name: Configure AWS credentials
+      if: steps.safety.outputs.should_deploy == 'true' && inputs.aws_role_arn != '' && inputs.aws_region != ''
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ inputs.aws_role_arn }}
+        aws-region: ${{ inputs.aws_region }}
+
+    # =========================================================================
+    # 12. Prepare artifacts directory
+    # =========================================================================
+    - name: Prepare artifacts directory
+      if: steps.safety.outputs.should_deploy == 'true'
+      shell: bash
+      run: |
+        mkdir -p terraform/plans
+        chmod -R 777 terraform/plans
+
+    # =========================================================================
+    # 13. Prepare GCP credentials for Docker volume mount
+    # =========================================================================
+    - name: Prepare Workload Identity credentials
+      id: prepare-creds
+      if: steps.safety.outputs.should_deploy == 'true'
+      shell: bash
+      env:
+        CRED_FILE_PATH: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+      run: |
+        set -euo pipefail
+        cp "$CRED_FILE_PATH" gcp-credentials.json
+        chmod 644 gcp-credentials.json
+        echo "credentials_path=$(pwd)/gcp-credentials.json" >> "$GITHUB_OUTPUT"
+
+    # =========================================================================
+    # 14. Docker login and pull R2A image
+    # =========================================================================
+    - name: Docker login and pull R2A image
+      if: steps.safety.outputs.should_deploy == 'true'
+      shell: bash
+      env:
+        DOCKERHUB_USERNAME: ${{ inputs.dockerhub_username }}
+        DOCKERHUB_TOKEN: ${{ inputs.dockerhub_token }}
+        R2A_VERSION: ${{ inputs.r2a_version }}
+      run: |
+        set -euo pipefail
+        IMAGE="usabilitydynamics/rabbit-automation-action:${R2A_VERSION}"
+
+        if [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]; then
+          echo "🔐 Logging in to Docker Hub..."
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+        fi
+
+        echo "📦 Pulling $IMAGE..."
+        docker pull "$IMAGE"
+        echo "✓ Image pulled successfully"
+
+    # =========================================================================
+    # 15. Run Rabbit Automation Action (Terraform engine)
+    # =========================================================================
+    - name: Run Rabbit Automation Action
+      id: terraform
+      if: steps.safety.outputs.should_deploy == 'true'
+      shell: bash
+      env:
+        R2A_VERSION: ${{ inputs.r2a_version }}
+        PROJECT_ID: ${{ inputs.project_id }}
+        GCP_REGION: "us-central1"
+        ENV_NAME: ${{ steps.resolve-env.outputs.environment }}
+        LIFECYCLE: ${{ steps.resolve-env.outputs.lifecycle }}
+        CONFIG_PATH: ${{ steps.resolve-env.outputs.config_path }}
+        PLAN_ONLY: ${{ steps.plan-mode.outputs.plan_only }}
+        TERRAFORM_ACTION: ${{ steps.terraform-action.outputs.terraform_action }}
+        MULTI_REPO: ${{ inputs.multi_repo }}
+        PRINT_CONFIG: ${{ inputs.print_config }}
+        K8S_CLUSTER_NAME: ${{ inputs.k8s_cluster_name }}
+        K8S_NAMESPACE: ${{ steps.deployment-metadata.outputs.k8s_namespace }}
+        NEWRELIC_ACCOUNT_ID: ${{ inputs.newrelic_account_id }}
+        NEWRELIC_API_KEY: ${{ inputs.newrelic_api_key }}
+        DOCKERHUB_USERNAME: ${{ inputs.dockerhub_username }}
+        DOCKERHUB_TOKEN: ${{ inputs.dockerhub_helm_token || inputs.dockerhub_token }}
+        SHARED_PROJECT: ${{ inputs.shared_project }}
+        REPO_OWNER: ${{ github.repository_owner }}
+        REPO_NAME: ${{ github.event.repository.name }}
+      run: |
+        set -euo pipefail
+        IMAGE="usabilitydynamics/rabbit-automation-action:${R2A_VERSION}"
+        ARTIFACTS_PATH="terraform/plans"
+
+        # Build AWS env vars (may be empty if AWS not configured)
+        aws_env=()
+        if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
+          aws_env+=(-e "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}")
+          aws_env+=(-e "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}")
+          aws_env+=(-e "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}")
+          aws_env+=(-e "AWS_REGION=${AWS_REGION:-}")
+        else
+          aws_env+=(-e "AWS_ACCESS_KEY_ID=")
+          aws_env+=(-e "AWS_SECRET_ACCESS_KEY=")
+          aws_env+=(-e "AWS_SESSION_TOKEN=")
+          aws_env+=(-e "AWS_REGION=")
+        fi
+
+        echo "🐰 Running Rabbit Automation Action..."
+        docker run --rm \
+          -v "$(pwd):/github/workspace" \
+          -e "GCP_PROJECT=${PROJECT_ID}" \
+          -e "GCP_REGION=${GCP_REGION}" \
+          -e "GIT_OWNER=${REPO_OWNER}" \
+          -e "GIT_REPOSITORY=${REPO_NAME}" \
+          -e "MULTI_REPO_PROJECT=${MULTI_REPO}" \
+          -e "ENV_NAME=${ENV_NAME}" \
+          -e "LIFECYCLE=${LIFECYCLE}" \
+          -e "YAML_CONFIG_PATH=${CONFIG_PATH}" \
+          -e "PLAN_ONLY=${PLAN_ONLY}" \
+          -e "ARTIFACTS_PATH=${ARTIFACTS_PATH}" \
+          -e "ACTORS_CLEANUP=false" \
+          -e "PRINT_CONFIG=${PRINT_CONFIG}" \
+          -e "TF_VAR_newrelic_account_id=${NEWRELIC_ACCOUNT_ID:-}" \
+          -e "TF_VAR_newrelic_api_key=${NEWRELIC_API_KEY:-}" \
+          -e "TERRAFORM_ACTION=${TERRAFORM_ACTION}" \
+          -e "K8S_CLUSTER_NAME=${K8S_CLUSTER_NAME:-}" \
+          -e "DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME:-}" \
+          -e "DOCKERHUB_TOKEN=${DOCKERHUB_TOKEN:-}" \
+          -e "SHARED_PROJECT=${SHARED_PROJECT:-}" \
+          -e "GOOGLE_APPLICATION_CREDENTIALS=/github/workspace/gcp-credentials.json" \
+          "${aws_env[@]}" \
+          "$IMAGE" \
+          /usr/local/bin/entrypoint.sh
+
+        echo ""
+        echo "📋 Artifacts generated:"
+        ls -la "$ARTIFACTS_PATH" 2>/dev/null || echo "No artifacts directory found"
+
+        # Extract CloudFront distribution ID from terraform outputs
+        cloudfront_distribution_id=""
+        cloudfront_service_id="$(yq -r '.services[] | select(.module=="aws-cloudfront-distribution") | .id' "${CONFIG_PATH}" 2>/dev/null || true)"
+
+        if [[ -n "$cloudfront_service_id" ]]; then
+          if [[ "$cloudfront_service_id" == *"#{Environment}"* ]]; then
+            cloudfront_service_id="${cloudfront_service_id//\#\{Environment\}/$ENV_NAME}"
+          fi
+
+          tf_output_file="$ARTIFACTS_PATH/aws-cloudfront-distribution-${cloudfront_service_id}-${ENV_NAME}.tfoutput.json"
+          if [[ -f "$tf_output_file" ]]; then
+            cloudfront_distribution_id="$(jq -r '.aws_cloudfront_distribution_id.value // empty' "$tf_output_file" 2>/dev/null || true)"
+          fi
+        fi
+
+        echo "aws_cloudfront_distribution_id=${cloudfront_distribution_id}" >> "$GITHUB_OUTPUT"
+
+    # =========================================================================
+    # 16. Upload terraform artifacts
+    # =========================================================================
+    - name: Upload terraform artifacts
+      if: steps.safety.outputs.should_deploy == 'true'
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-artifacts-${{ steps.resolve-env.outputs.environment }}
+        path: terraform/plans
+        if-no-files-found: warn
+
+    # =========================================================================
+    # 17. Render plan summary
+    # =========================================================================
+    - name: Render plan summary
+      id: plan-summary
+      if: always() && steps.safety.outputs.should_deploy == 'true'
+      shell: bash
+      env:
+        ARTIFACTS_PATH: "terraform/plans"
+        ENV_NAME: ${{ steps.resolve-env.outputs.environment }}
+      run: |
+        set -euo pipefail
+        summary_file="$ARTIFACTS_PATH/plan-summary.json"
+
+        if [[ ! -f "$summary_file" ]]; then
+          echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          echo "has_summary=false" >> "$GITHUB_OUTPUT"
+          echo "changes_msg=No plan summary available" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if ! jq empty "$summary_file" >/dev/null 2>&1; then
+          echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          echo "has_summary=false" >> "$GITHUB_OUTPUT"
+          echo "changes_msg=Invalid plan summary" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Parse totals from plan-summary.json
+        total_add="$(jq -r '.total.add // 0' "$summary_file" 2>/dev/null || echo 0)"
+        total_change="$(jq -r '.total.change // 0' "$summary_file" 2>/dev/null || echo 0)"
+        total_destroy="$(jq -r '.total.destroy // 0' "$summary_file" 2>/dev/null || echo 0)"
+
+        changes_msg="Add: $total_add, Change: $total_change, Destroy: $total_destroy"
+        echo "changes_msg=$changes_msg" >> "$GITHUB_OUTPUT"
+        echo "has_summary=true" >> "$GITHUB_OUTPUT"
+        echo "total_add=$total_add" >> "$GITHUB_OUTPUT"
+        echo "total_change=$total_change" >> "$GITHUB_OUTPUT"
+        echo "total_destroy=$total_destroy" >> "$GITHUB_OUTPUT"
+
+        if [[ "$total_add" -gt 0 || "$total_change" -gt 0 || "$total_destroy" -gt 0 ]]; then
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_changes=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        # Render per-module breakdown markdown
+        bash "${GITHUB_ACTION_PATH}/bin/render-plan-summary.sh" "$summary_file" "$ARTIFACTS_PATH/plan-summary.md"
+
+    # =========================================================================
+    # 18. Write deployment summary
+    # =========================================================================
+    - name: Write deployment summary
+      if: always() && steps.safety.outputs.should_deploy == 'true'
+      shell: bash
+      env:
+        HAS_CHANGES: ${{ steps.plan-summary.outputs.has_changes }}
+        CHANGES_MSG: ${{ steps.plan-summary.outputs.changes_msg }}
+        ENV_NAME: ${{ steps.resolve-env.outputs.environment }}
+        LIFECYCLE: ${{ steps.resolve-env.outputs.lifecycle }}
+        PLAN_ONLY: ${{ steps.plan-mode.outputs.plan_only }}
+        TERRAFORM_ACTION: ${{ steps.terraform-action.outputs.terraform_action }}
+        K8S_NAMESPACE: ${{ steps.deployment-metadata.outputs.k8s_namespace }}
+        CLOUDFRONT_ID: ${{ steps.terraform.outputs.aws_cloudfront_distribution_id }}
+        PLAN_SUMMARY_MD: "terraform/plans/plan-summary.md"
+      run: |
+        {
+          echo "## Deployment Summary"
+          echo ""
+          echo "| Environment | Action | Changes |"
+          echo "| --- | --- | --- |"
+          echo "| \`${ENV_NAME}\` | \`${TERRAFORM_ACTION}\` | ${CHANGES_MSG:-No data} |"
+          echo ""
+          echo "### Scope"
+          echo ""
+          echo "| Field | Value |"
+          echo "| --- | --- |"
+          echo "| Lifecycle | \`${LIFECYCLE}\` |"
+          echo "| Plan Only | \`${PLAN_ONLY}\` |"
+          echo ""
+          echo "### Outputs"
+          echo ""
+          echo "| Field | Value |"
+          echo "| --- | --- |"
+          echo "| Kubernetes Namespace | \`${K8S_NAMESPACE:-n/a}\` |"
+          echo "| CloudFront Distribution ID | \`${CLOUDFRONT_ID:-n/a}\` |"
+          echo ""
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [[ -f "$PLAN_SUMMARY_MD" ]]; then
+          cat "$PLAN_SUMMARY_MD" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    # =========================================================================
+    # 19. Post PR comment with plan summary
+    # =========================================================================
+    - name: Post PR comment with plan summary
+      if: github.event_name == 'pull_request' && steps.plan-summary.outputs.has_changes == 'true'
+      uses: actions/github-script@v7
+      env:
+        PLAN_SUMMARY_MD: "terraform/plans/plan-summary.md"
+        TOTAL_DESTROY: ${{ steps.plan-summary.outputs.total_destroy }}
+      with:
+        github-token: ${{ inputs.github_token }}
+        script: |
+          const fs = require('fs');
+          try {
+            const planSummaryMarkdownPath = process.env.PLAN_SUMMARY_MD;
+            if (!fs.existsSync(planSummaryMarkdownPath)) {
+              core.notice('Plan summary markdown not found');
+              return;
+            }
+
+            const destroy = Number(process.env.TOTAL_DESTROY) || 0;
+
+            let commentBody = '## Terraform Plan Summary\n\n';
+            commentBody += `${fs.readFileSync(planSummaryMarkdownPath, 'utf8')}\n`;
+
+            if (destroy > 0) {
+              commentBody += '⚠️ **Warning: This plan will destroy resources** ⚠️\n\n';
+            }
+
+            commentBody += `[View full plan details](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('Terraform Plan Summary')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                comment_id: botComment.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: commentBody
+              });
+            }
+          } catch (error) {
+            core.warning(`Error posting PR comment: ${error.message}`);
+          }
+
+    # =========================================================================
+    # 20. Upload terraform plan files
+    # =========================================================================
+    - name: Upload terraform plans
+      if: steps.plan-summary.outputs.has_changes == 'true'
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plans-${{ steps.resolve-env.outputs.environment }}
+        path: terraform/plans/*.tfplan
+        if-no-files-found: ignore
+
+    # =========================================================================
+    # 21. Send Slack notification
+    # =========================================================================
+    - name: Send Slack notification
+      if: always() && inputs.slack_webhook != '' && (steps.plan-summary.outputs.has_changes == 'true' || steps.terraform.outcome == 'failure' || steps.safety.outcome == 'failure')
+      shell: bash
+      env:
+        SLACK_WEBHOOK: ${{ inputs.slack_webhook }}
+        ENV_NAME: ${{ steps.resolve-env.outputs.environment }}
+        PLAN_ONLY: ${{ steps.plan-mode.outputs.plan_only }}
+        CHANGES_MSG: ${{ steps.plan-summary.outputs.changes_msg }}
+        TERRAFORM_OUTCOME: ${{ steps.terraform.outcome }}
+        SAFETY_OUTCOME: ${{ steps.safety.outcome }}
+        TRIGGER: ${{ github.event_name }}
+        REPOSITORY: ${{ github.repository }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        # Determine status
+        if [[ "$SAFETY_OUTCOME" == "failure" ]]; then
+          emoji="❌"
+          title="Infrastructure Build Failed"
+          message="Infrastructure build *failed* for \`${ENV_NAME:-unknown}\` environment\n\n*Stage:* Configuration & Validation\n*Reason:* Safety checks failed"
+        elif [[ "$TERRAFORM_OUTCOME" == "failure" ]]; then
+          emoji="❌"
+          title="Infrastructure Deployment Failed"
+          message="Infrastructure build *failed* for \`${ENV_NAME:-unknown}\` environment\n\n*Stage:* Infrastructure Deployment\n*Reason:* Terraform execution failed"
+        else
+          emoji="✅"
+          if [[ "$PLAN_ONLY" == "true" ]]; then
+            title="Terraform Plan"
+            message="Infrastructure changes *detected* for \`${ENV_NAME:-unknown}\` environment"
+          else
+            title="Infrastructure Deployment"
+            message="Infrastructure changes *applied* to \`${ENV_NAME:-unknown}\` environment"
+          fi
+          if [[ -n "${CHANGES_MSG:-}" ]]; then
+            message="${message}\n\n*Changes:* ${CHANGES_MSG}"
+          fi
+        fi
+
+        message="${message}\n\n*Trigger:* ${TRIGGER}\n*Repository:* ${REPOSITORY}"
+
+        payload=$(cat <<PAYLOAD
+        {
+          "text": "Infrastructure Build: ${ENV_NAME:-unknown} - ${title}",
+          "blocks": [
+            {
+              "type": "header",
+              "text": { "type": "plain_text", "text": "${emoji} ${title}", "emoji": true }
+            },
+            {
+              "type": "section",
+              "text": { "type": "mrkdwn", "text": "${message}" }
+            },
+            { "type": "divider" },
+            {
+              "type": "actions",
+              "elements": [{
+                "type": "button",
+                "text": { "type": "plain_text", "text": "View GitHub Action", "emoji": true },
+                "url": "${RUN_URL}"
+              }]
+            }
+          ]
+        }
+        PAYLOAD
+        )
+
+        curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK" || true
