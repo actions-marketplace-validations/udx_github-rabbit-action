@@ -13,9 +13,9 @@ The action is released from `production`. Patch releases are immutable
    environment. Use `@production` only for that canary.
 
 The `Publish release` workflow runs after every `production` push. It does
-nothing unless that push changes `package.json`; then it runs `make test`,
-refuses to reuse an existing tag, and publishes that GitHub release from the
-merged commit. The `Verify release` workflow then validates the published tag.
+nothing unless that push changes the `package.json` version; then it runs
+`make test`, refuses to reuse an existing tag, and publishes that GitHub
+release from the merged commit. The `Verify release` workflow then validates the published tag.
 After the GitHub release is created, `#rabbit-support` receives the Marketplace
 handoff through `SLACK_WEBHOOK_RABBIT_SUPPORT`; the message directs the
 operator to wait for verification before publishing to Marketplace.
@@ -23,7 +23,8 @@ operator to wait for verification before publishing to Marketplace.
 `package.json` is the single release-version source. Its semantic version maps
 to the Git tag by adding `v` and must match the first semantic heading in
 `CHANGELOG.md`; `make test` enforces that contract before a release can be
-published.
+published. A production push creates a release only when this version changes,
+and its version must increase.
 
 ## Publish to GitHub Marketplace
 
