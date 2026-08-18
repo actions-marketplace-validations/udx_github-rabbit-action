@@ -71,9 +71,11 @@ jobs:
             exit 1
           fi
 
-          printf 'tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
-          printf 'notes_file=%s\n' "$notes_file" >> "$GITHUB_OUTPUT"
-          printf 'publish=true\n' >> "$GITHUB_OUTPUT"
+          {
+            printf 'tag=%s\n' "$release_tag"
+            printf 'notes_file=%s\n' "$notes_file"
+            printf 'publish=true\n'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub release
         if: steps.release.outputs.publish == 'true'
