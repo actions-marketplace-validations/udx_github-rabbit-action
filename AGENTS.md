@@ -6,13 +6,14 @@ Run `make test` before opening or updating a pull request.
 
 ## Releases
 
-Keep public action changes backward compatible within `v1`. Add the next
-immutable `v1.x.y` entry to `CHANGELOG.md` with each release-worthy change;
-the production release workflow publishes it after validation and notifies
-`#rabbit-support` through its dedicated repository secret. Confirm the
-Marketplace UI publication, then move the `v1` tag only after caller canary
-validation. Follow [`docs/releasing.md`](docs/releasing.md); do not publish or
-move tags as part of an ordinary pull-request update.
+Keep public action changes backward compatible within `v1`. Bump the version
+in `package.json` and add its matching immutable `v1.x.y` entry to
+`CHANGELOG.md` with each release-worthy change; the production release workflow
+publishes it after validation and notifies `#rabbit-support` through its
+dedicated repository secret. Confirm the Marketplace UI publication, then move
+the `v1` tag only after caller canary validation. Follow
+[`docs/releasing.md`](docs/releasing.md); do not publish or move tags as part
+of an ordinary pull-request update.
 
 ## Rabbit CI Context
 

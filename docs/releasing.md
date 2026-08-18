@@ -5,25 +5,25 @@ The action is released from `production`. Patch releases are immutable
 
 ## Prepare a release
 
-1. Add the next semantic version and concise user-facing notes at the top of
-   `CHANGELOG.md` in the pull request that changes action behavior.
+1. Bump `package.json` to the next semantic version and add matching concise
+   user-facing notes at the top of `CHANGELOG.md` in the pull request that
+   changes action behavior.
 2. Merge the focused, reviewed pull request into `production`.
 3. Test the exact `production` commit from a caller's non-production
    environment. Use `@production` only for that canary.
 
 The `Publish release` workflow runs after every `production` push. It does
-nothing unless that push changes `CHANGELOG.md`; then it runs `make test`,
-reads the first semantic version, refuses to reuse an existing tag, and
-publishes that GitHub release from the merged commit. The `Verify release`
-workflow then validates the published tag. After the GitHub release is
-created, `#rabbit-support` receives the Marketplace handoff through
-`SLACK_WEBHOOK_RABBIT_SUPPORT`; the message directs the operator to wait for
-verification before publishing to Marketplace.
+nothing unless that push changes `package.json`; then it runs `make test`,
+refuses to reuse an existing tag, and publishes that GitHub release from the
+merged commit. The `Verify release` workflow then validates the published tag.
+After the GitHub release is created, `#rabbit-support` receives the Marketplace
+handoff through `SLACK_WEBHOOK_RABBIT_SUPPORT`; the message directs the
+operator to wait for verification before publishing to Marketplace.
 
-`CHANGELOG.md` is the only release-version source. A change to it must put a
-new semantic version heading first; editing it while its leading version is
-already tagged fails the release workflow instead of creating an ambiguous
-release.
+`package.json` is the single release-version source. Its semantic version maps
+to the Git tag by adding `v` and must match the first semantic heading in
+`CHANGELOG.md`; `make test` enforces that contract before a release can be
+published.
 
 ## Publish to GitHub Marketplace
 

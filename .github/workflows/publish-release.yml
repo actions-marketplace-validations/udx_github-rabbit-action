@@ -39,33 +39,23 @@ jobs:
         shell: bash
         run: make test
 
-      - name: Read next version from changelog
+      - name: Read new version
         id: release
         shell: bash
         run: |
           set -euo pipefail
 
-          if git diff --quiet "${{ github.event.before }}" "$GITHUB_SHA" -- CHANGELOG.md; then
+          if git diff --quiet "${{ github.event.before }}" "$GITHUB_SHA" -- package.json; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "No release: CHANGELOG.md was not changed by this production push."
+            echo "No release: package.json was not changed by this production push."
             exit 0
           fi
 
-          release_tag=""
-          while IFS= read -r line; do
-            if [[ "$line" =~ ^##\ (v[0-9]+\.[0-9]+\.[0-9]+)\ -\  ]]; then
-              release_tag="${BASH_REMATCH[1]}"
-              break
-            fi
-          done < CHANGELOG.md
-
-          if [[ -z "$release_tag" ]]; then
-            echo "::error title=Missing release version::The first version heading in CHANGELOG.md must be a semantic tag such as v1.0.3."
-            exit 1
-          fi
+          release_version="$(jq -r '.version // empty' package.json)"
+          release_tag="v${release_version}"
 
           if git ls-remote --exit-code --tags origin "refs/tags/$release_tag" >/dev/null; then
-            echo "::error title=Release already exists::Tag $release_tag already exists. Add the next semantic version to CHANGELOG.md before merging."
+            echo "::error title=Release already exists::Tag $release_tag already exists. Bump package.json before merging."
             exit 1
           fi
 

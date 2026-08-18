@@ -243,8 +243,10 @@ order.
 
 Use the maintained `@v1` major tag in caller workflows. Patch releases are
 published as immutable `v1.x.y` GitHub releases, then `v1` moves to the tested
-compatible release. See [the release guide](docs/releasing.md) and
-[changelog](CHANGELOG.md).
+compatible release. The [`package.json`](package.json) version is the release
+source and the
+[changelog](CHANGELOG.md) supplies its release notes. See [the release
+guide](docs/releasing.md) for the complete process.
 
 ---
 
