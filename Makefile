@@ -41,3 +41,4 @@ validate-action:
 validate-workflow:
 	yq eval '.' .github/workflows/ci.yml >/dev/null
 	yq eval '.' .github/workflows/release.yml >/dev/null
+	yq eval '.' .github/workflows/publish-release.yml >/dev/null

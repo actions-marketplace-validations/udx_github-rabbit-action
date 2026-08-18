@@ -1,0 +1,120 @@
+name: Publish release
+
+on:
+  push:
+    branches:
+      - production
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-release-production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish versioned release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout production
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned yq
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="v4.44.3"
+          sha256="a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7"
+          install_dir="${RUNNER_TEMP}/rabbit-action-bin"
+          mkdir -p "$install_dir"
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${version}/yq_linux_amd64" -o "$install_dir/yq"
+          printf '%s  %s\n' "$sha256" "$install_dir/yq" | sha256sum --check --status
+          chmod +x "$install_dir/yq"
+          echo "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Validate release candidate
+        shell: bash
+        run: make test
+
+      - name: Read next version from changelog
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet "${{ github.event.before }}" "$GITHUB_SHA" -- CHANGELOG.md; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "No release: CHANGELOG.md was not changed by this production push."
+            exit 0
+          fi
+
+          release_tag=""
+          while IFS= read -r line; do
+            if [[ "$line" =~ ^##\ (v[0-9]+\.[0-9]+\.[0-9]+)\ -\  ]]; then
+              release_tag="${BASH_REMATCH[1]}"
+              break
+            fi
+          done < CHANGELOG.md
+
+          if [[ -z "$release_tag" ]]; then
+            echo "::error title=Missing release version::The first version heading in CHANGELOG.md must be a semantic tag such as v1.0.3."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$release_tag" >/dev/null; then
+            echo "::error title=Release already exists::Tag $release_tag already exists. Add the next semantic version to CHANGELOG.md before merging."
+            exit 1
+          fi
+
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          awk -v heading="## ${release_tag} - " '
+            index($0, heading) == 1 { include = 1; next }
+            include && /^## / { exit }
+            include { print }
+          ' CHANGELOG.md > "$notes_file"
+
+          if [[ ! -s "$notes_file" ]]; then
+            echo "::error title=Missing release notes::Add release notes below the $release_tag heading in CHANGELOG.md."
+            exit 1
+          fi
+
+          printf 'tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
+          printf 'notes_file=%s\n' "$notes_file" >> "$GITHUB_OUTPUT"
+          printf 'publish=true\n' >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        if: steps.release.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_NOTES: ${{ steps.release.outputs.notes_file }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Rabbit Automation Action $RELEASE_TAG" \
+            --notes-file "$RELEASE_NOTES"
+
+      - name: Notify Rabbit support
+        if: steps.release.outputs.publish == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_RABBIT_SUPPORT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc \
+            --arg tag "$RELEASE_TAG" \
+            --arg url "$RELEASE_URL" \
+            '{text: ("Rabbit Automation Action " + $tag + " is published. Marketplace action: open " + $url + ", wait for Verify release to pass, then publish to the GitHub Marketplace. Verify the listing and complete the caller canary before moving v1.")}')"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header 'Content-type: application/json' \
+            --data "$payload" \
+            "$SLACK_WEBHOOK"
