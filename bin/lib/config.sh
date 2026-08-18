@@ -8,7 +8,22 @@ fi
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$LIB_DIR/../.." && pwd)"
-LIFECYCLE_POLICY_FILE="${LIFECYCLE_POLICY_FILE:-$PROJECT_ROOT/src/configs/lifecycle-policy.yaml}"
+BUNDLED_LIFECYCLE_POLICY_FILE="$PROJECT_ROOT/src/configs/lifecycle-policy.yaml"
+
+# A caller may provide a policy relative to the checked-out repository. The
+# same resolved file is used by lifecycle resolution and config merging.
+if [[ -z "${LIFECYCLE_POLICY_FILE:-}" ]]; then
+    if [[ -n "${INPUT_LIFECYCLE_POLICY_PATH:-}" ]]; then
+        if [[ "$INPUT_LIFECYCLE_POLICY_PATH" == /* ]]; then
+            LIFECYCLE_POLICY_FILE="$INPUT_LIFECYCLE_POLICY_PATH"
+        else
+            LIFECYCLE_POLICY_FILE="${GITHUB_WORKSPACE:-$PWD}/$INPUT_LIFECYCLE_POLICY_PATH"
+        fi
+    else
+        LIFECYCLE_POLICY_FILE="$BUNDLED_LIFECYCLE_POLICY_FILE"
+    fi
+fi
+export LIFECYCLE_POLICY_FILE
 
 _yaml_get_or_default() {
     local query="$1"
@@ -54,7 +69,7 @@ export NO_ENVIRONMENT_VALUE="${INPUT_NO_ENVIRONMENT_VALUE:-none}"
 # Discovery configuration (can be overridden via GitHub Action inputs)
 export SKIP_DIRECTORIES="${INPUT_SKIP_DIRECTORIES:-node_modules,vendor}"
 
-# Lifecycle configuration (can be overridden via GitHub Action inputs)
+# Rabbit config layout (can be overridden via GitHub Action inputs)
 DEFAULT_LIFECYCLE_PRODUCTION="production"
 DEFAULT_LIFECYCLE_STAGING="staging"
 DEFAULT_LIFECYCLE_DEVELOPMENT="development"
@@ -80,8 +95,11 @@ export SUBDIR_PREFERRED_LIFECYCLE="${INPUT_SUBDIR_PREFERRED_LIFECYCLE:-$DEFAULT_
 export PROTECTED_BRANCH_LIFECYCLE="${INPUT_PROTECTED_BRANCH_LIFECYCLE:-$DEFAULT_PROTECTED_BRANCH_LIFECYCLE}"
 export FALLBACK_LIFECYCLE="${INPUT_FALLBACK_LIFECYCLE:-$DEFAULT_FALLBACK_LIFECYCLE}"
 
-# Exported lifecycle (set in main function)
-export LIFECYCLE=""
+# Exported lifecycle metadata. The composite action resolves these in-repo;
+# local script runs retain the compatibility fallback when no value is supplied.
+export LIFECYCLE="${INPUT_LIFECYCLE:-}"
+export IS_PROTECTED="${INPUT_IS_PROTECTED:-}"
+export RESOLUTION_REASON="${INPUT_RESOLUTION_REASON:-}"
 
 # ============================================================================
 # INPUT PARAMETERS
@@ -95,6 +113,7 @@ export RECURSIVE="${INPUT_RECURSIVE:-true}"
 export FILE_PATTERNS="${INPUT_FILE_PATTERNS:-*.yml,*.yaml}"
 export OUTPUT_FORMAT="${INPUT_OUTPUT_FORMAT:-yaml}"
 export DEBUG="${INPUT_DEBUG:-false}"
+export ENABLE_ANNOTATIONS="${ENABLE_ANNOTATIONS:-false}"
 export GITHUB_OUTPUT="${GITHUB_OUTPUT:-/dev/null}"
 
 readonly CONFIG_LIB_LOADED="true"

@@ -50,15 +50,22 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_AUTH_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        if: vars.AWS_REGION != ''
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
       - uses: udx/github-rabbit-action@v1
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
-          gcp_auth_provider: ${{ vars.GCP_AUTH_PROVIDER }}
-          gcp_service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
-          aws_region: ${{ vars.AWS_REGION }}
-          aws_role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
           slack_webhook: ${{ secrets.SLACK_WEBHOOK_ROUTINE }}
           dockerhub_username: ${{ vars.DOCKERHUB_USER_LOGIN }}
           dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN_PULL_R2A }}
@@ -132,31 +139,29 @@ services:
 │ GitHub Action Trigger (push / PR / delete / manual) │
 └──────────────────────┬──────────────────────────────┘
                        │
-         ┌─────────────▼──────────────┐
-         │   1. Merge Configs         │
-         │   Discover .rabbit/ YAML   │
-         │   Resolve lifecycle        │
-         │   Deep merge by module::id │
+        ┌─────────────▼──────────────┐
+        │   1. Resolve Lifecycle     │
+        │   In-repo branch/env       │
+        │   policy and protection    │
+        └─────────────┬──────────────┘
+                      │
+        ┌─────────────▼──────────────┐
+        │   2. Merge Configs         │
+        │   Discover .rabbit/ YAML   │
+        │   Deep merge by module::id │
          └─────────────┬──────────────┘
                        │
          ┌─────────────▼──────────────┐
-         │   2. Safety Checks         │
+         │   3. Safety Checks         │
          │   Block production manual  │
          │   Block production destroy │
          │   Auto plan-only for PRs   │
          └─────────────┬──────────────┘
                        │
          ┌─────────────▼──────────────┐
-         │   3. Cloud Auth            │
-         │   GCP Workload Identity    │
-         │   AWS OIDC (optional)      │
-         └─────────────┬──────────────┘
-                       │
-         ┌─────────────▼──────────────┐
          │   4. Terraform Engine      │
-         │   Docker: r2a container    │
-         │   Per-service init/plan/   │
-         │   apply in deploy order    │
+         │   Caller credentials       │
+         │   passed into R2A          │
          └─────────────┬──────────────┘
                        │
          ┌─────────────▼──────────────┐
@@ -170,7 +175,7 @@ services:
 
 ### Environment Detection
 
-The environment is automatically resolved from:
+The environment is automatically resolved from the workflow event, then resolved against this action's lifecycle policy:
 
 | Trigger | Environment Source |
 | --- | --- |
@@ -201,7 +206,10 @@ Infrastructure configs live in `.rabbit/` directories organized by lifecycle:
 
 - Files are sorted by name (`10-infra.yaml` before `20-monitoring.yaml`)
 - Services with the same `module::id` are deep-merged across files
-- Root-level files in `.rabbit/` are ignored (must be in a lifecycle directory)
+- Root-level files in the configured `source_dir` are ignored (must be in a lifecycle directory)
+- Only direct lifecycle roots under `source_dir` are eligible; use `source_dir: .rabbit/infra_configs` for nested config roots
+
+See [docs/configuration.md](docs/configuration.md) for the repo-owned Rabbit config layout and merge contract.
 
 ### Plan Mode
 
@@ -222,56 +230,14 @@ Infrastructure configs live in `.rabbit/` directories organized by lifecycle:
 
 ---
 
-## List of Modules
+## Available Modules
 
-### AWS
+The [module library](https://github.com/udx/github-rabbit-action/wiki/Modules)
+is the current configuration reference for every R2A module, including its
+schema, prerequisites, examples, and outputs.
 
-| Module | Description | Order |
-| --- | --- | --- |
-| `aws-route53` | DNS zones and records | 5 |
-| `aws-acm` | SSL/TLS certificates | 8 |
-| `aws-waf` | Web Application Firewall rules | 125 |
-| `aws-cloudfront-distribution` | CDN distribution with origins, behaviors, cache | 130 |
-
-### GCP
-
-| Module | Description | Order |
-| --- | --- | --- |
-| `gcp-networking` | VPC networks and firewall rules | 10 |
-| `gcp-static-ip` | Regional/global static IP addresses | 15 |
-| `gcp-postgresql-instance` | Cloud SQL PostgreSQL instances | 20 |
-| `gcp-sql-instance` | Cloud SQL MySQL instances | 20 |
-| `gcp-gke-cluster` | GKE cluster provisioning | 30 |
-| `gcp-gke-nodepool` | GKE node pool configuration | 40 |
-| `gcp-iam` | IAM roles and service accounts | — |
-| `gcp-secret-manager` | Secret Manager entries | — |
-| `gcp-storage` | Cloud Storage buckets | — |
-| `gcp-monitoring` | Monitoring alert policies | 140 |
-
-### Kubernetes
-
-| Module | Description | Order |
-| --- | --- | --- |
-| `k8s-shared-http-gateway` | Shared HTTP gateway for routing | 55 |
-| `k8s-namespace` | Namespace with labels and annotations | 60 |
-| `k8s-secret` | Kubernetes secrets from config or GCP Secret Manager | 70 |
-| `k8s-access` | RBAC roles and bindings | 80 |
-| `k8s-service` | ClusterIP/LoadBalancer/NodePort services | 90 |
-| `k8s-http-health-check-policy` | Health check policies for gateway routes | 92 |
-| `k8s-http-gateway-route` | HTTP routing rules for gateway | 93 |
-| `k8s-configmap` | ConfigMaps from inline data or files | 95 |
-| `k8s-deployment` | Deployments with rolling updates | 100 |
-| `k8s-memcached` | Memcached StatefulSet | 102 |
-| `k8s-hpa` | Horizontal Pod Autoscaler | 110 |
-| `k8s-pdb` | Pod Disruption Budget | 120 |
-
-### Monitoring
-
-| Module | Description | Order |
-| --- | --- | --- |
-| `newrelic-synthetic-monitors` | New Relic synthetic monitoring | 150 |
-
-**Deployment Order** — services are deployed in ascending order by their module's deployment order. Destroy operations reverse the order.
+Services deploy in ascending module order; destroy operations use the reverse
+order.
 
 ---
 
@@ -449,15 +415,19 @@ The workflow dispatch inputs provide safe manual control:
 
 ---
 
+## Authentication and state ownership
+
+The caller workflow owns cloud authentication. Authenticate with Google Cloud before invoking the action; the action mounts the resulting `GOOGLE_APPLICATION_CREDENTIALS` file read-only into the R2A container and never copies it into the workspace. Configure AWS credentials in the caller when the configuration uses AWS; the action forwards the resulting AWS session variables to R2A.
+
+The optional state-backend inputs are passed through to the IaC engine. Omit them to retain its existing GCS default; provide the backend type, configuration, and state-path key only when the selected backend requires an override.
+
+---
+
 ## Inputs Reference
 
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
-| `project_id` | ✅ | — | GCP project ID |
-| `gcp_auth_provider` | ✅ | — | GCP Workload Identity Provider |
-| `gcp_service_account` | ✅ | — | GCP Service Account email |
-| `aws_role_arn` | — | — | AWS IAM OIDC role ARN |
-| `aws_region` | — | — | AWS region |
+| `project_id` | ✅ | — | Project identifier for state and resource operations |
 | `dockerhub_username` | — | — | Docker Hub username |
 | `dockerhub_token` | — | — | Docker Hub pull token |
 | `dockerhub_helm_token` | — | — | Docker Hub Helm OCI token |
@@ -472,8 +442,12 @@ The workflow dispatch inputs provide safe manual control:
 | `newrelic_account_id` | — | — | New Relic account ID |
 | `newrelic_api_key` | — | — | New Relic API key |
 | `slack_webhook` | — | — | Slack webhook URL |
+| `state_backend` | — | container default (GCS) | Optional backend override, such as `s3`, `azurerm`, `http`, or `consul` |
+| `state_backend_config` | — | — | Backend configuration as `key=value` lines |
+| `state_prefix_key` | — | — | Backend configuration key for the state path, such as `prefix` or `key` |
 | `source_dir` | — | `.rabbit` | Config source directory |
-| `github_token` | — | `github.token` | GitHub token for PR comments |
+| `lifecycle_policy_path` | — | bundled policy | Optional caller-repository lifecycle policy shared by resolution and config merging |
+| `github_token` | — | `github.token` | GitHub token passed to lifecycle resolution and used for PR comments |
 
 ## Outputs
 
@@ -481,6 +455,9 @@ The workflow dispatch inputs provide safe manual control:
 | --- | --- |
 | `environment` | Resolved environment name |
 | `lifecycle` | Resolved lifecycle (production/staging/development) |
+| `is_protected` | Whether GitHub reported the environment branch as protected |
+| `resolution_reason` | Lifecycle rule that selected the lifecycle |
+| `lifecycle_policy_path` | Lifecycle policy used for resolution and config merging |
 | `plan_only` | Whether run was plan-only |
 | `terraform_action` | Action executed (apply/destroy/skip) |
 | `has_changes` | Whether Terraform detected changes |
@@ -528,8 +505,13 @@ Notifications include environment, change counts, failure stage, and a link to t
 - **Pin `r2a_version`** to a specific tag for reproducible deploys (e.g., `4.8.0` instead of `latest`)
 - **Name files with numeric prefixes** (`10-dns.yaml`, `20-cdn.yaml`, `30-app.yaml`) for deterministic ordering
 - **Use `#{Environment}` placeholders** in service IDs to keep configs environment-aware
+- **Set `source_dir` explicitly** when configs live below `.rabbit/infra_configs` or another nested root
 - **Schedule nightly runs** (`cron: "0 2 * * *"`) to detect infrastructure drift
 - **Keep `.rabbit/` configs small and focused** — one concern per file
+
+## Development
+
+The local validation contract is documented in [docs/validation.md](docs/validation.md). Run `make test` and `rabbit.ci` before updating a PR.
 
 ---
 
