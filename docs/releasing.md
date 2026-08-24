@@ -3,30 +3,43 @@
 The action is released from `production`. Patch releases are immutable
 `v1.x.y` tags; `v1` is the movable compatibility tag that callers use.
 
-## Before publishing
+## Prepare a release
 
-1. Merge a focused, reviewed pull request into `production`.
-2. Confirm the CI action-contract and workflow-lint jobs pass.
+1. Bump `package.json` to the next semantic version and add matching concise
+   user-facing notes at the top of `CHANGELOG.md` in the pull request that
+   changes action behavior.
+2. Merge the focused, reviewed pull request into `production`.
 3. Test the exact `production` commit from a caller's non-production
    environment. Use `@production` only for that canary.
-4. Add a concise, user-facing entry to `CHANGELOG.md` when the behavior
-   changes.
 
-## Publish the release
+The `Publish release` workflow runs after every `production` push. It does
+nothing unless that push changes the `package.json` version; then it runs
+`make test`, refuses to reuse an existing tag, and publishes that GitHub
+release from the merged commit. The `Verify release` workflow then validates the published tag.
+After the GitHub release is created, `#rabbit-support` receives the Marketplace
+handoff through `SLACK_WEBHOOK_RABBIT_SUPPORT`; the message directs the
+operator to wait for verification before publishing to Marketplace.
 
-1. Create a semantic GitHub release from the tested `production` commit, for
-   example `v1.0.3`.
-2. In the release form, select **Publish this Action to the GitHub
-   Marketplace**. GitHub requires this UI step and may require 2FA; a release
-   created only through the REST or CLI release API is not enough.
+`package.json` is the single release-version source. Its semantic version maps
+to the Git tag by adding `v` and must match the first semantic heading in
+`CHANGELOG.md`; `make test` enforces that contract before a release can be
+published. A production push creates a release only when this version changes,
+and its version must increase.
+
+## Publish to GitHub Marketplace
+
+1. Confirm the `Verify release` workflow passed for the automatically
+   published semantic GitHub release, for example `v1.0.3`.
+2. Open that release and, in the release form, select **Publish this Action to
+   the GitHub Marketplace**. GitHub requires this UI step and may require 2FA;
+   a release created only through the REST or CLI release API is not enough.
 3. Keep `Deployment` as the primary Marketplace category and `Security` as the
    secondary category unless the action's public purpose changes.
 4. Verify the Marketplace listing shows the new version, current `action.yml`
    metadata, and current README before changing any caller references.
 
-Publishing triggers `Verify release`, which checks the semantic tag and runs
-the action contract from that tag. It confirms the published artifact; it does
-not replace the pre-release caller canary or the Marketplace UI verification.
+The published-tag verification does not replace the pre-release caller canary
+or the Marketplace UI verification.
 
 ## Promote callers
 

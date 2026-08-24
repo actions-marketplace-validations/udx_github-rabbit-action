@@ -5,9 +5,9 @@ repository:
   owner: udx
   default_branch: production
 branches:
-  - name: dependabot/github_actions/actions/checkout-7
+  - name: chore/action-release-standards
     rules: {}
-  - name: dependabot/github_actions/actions/github-script-9
+  - name: chore/publish-versioned-releases
     rules: {}
   - name: dependabot/github_actions/actions/upload-artifact-7
     rules: {}
@@ -42,7 +42,8 @@ configuration:
       - BITBUCKET_TOKEN
       - CONTEXT7_API_KEY
       - DEPENDABOT_REVIEWER_TOKEN
-    repository: []
+    repository:
+      - SLACK_WEBHOOK_RABBIT_SUPPORT
   variables:
     organization:
       - DOCKER_LOGIN
@@ -71,6 +72,13 @@ workflows:
       workflow_dispatch: {}
     permissions:
       contents: read
+  - path: .github/workflows/publish-release.yml
+    triggers:
+      push:
+        branches:
+          - production
+    permissions:
+      contents: write
   - path: .github/workflows/release.yml
     triggers:
       release:

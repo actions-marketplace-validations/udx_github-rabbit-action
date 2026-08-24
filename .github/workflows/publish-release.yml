@@ -1,0 +1,124 @@
+name: Publish release
+
+on:
+  push:
+    branches:
+      - production
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-release-production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish versioned release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout production
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install yq
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="v4.44.3"
+          install_dir="${RUNNER_TEMP}/rabbit-action-bin"
+          mkdir -p "$install_dir"
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${version}/yq_linux_amd64" -o "$install_dir/yq"
+          chmod +x "$install_dir/yq"
+          echo "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Validate release candidate
+        shell: bash
+        run: make test
+
+      - name: Read new version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_version="$(jq -r '.version // empty' package.json)"
+          previous_version="$(git show "${{ github.event.before }}:package.json" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+
+          if [[ "$release_version" == "$previous_version" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "No release: package.json version was not changed by this production push."
+            exit 0
+          fi
+
+          if [[ -n "$previous_version" ]]; then
+            IFS=. read -r previous_major previous_minor previous_patch <<< "$previous_version"
+            IFS=. read -r release_major release_minor release_patch <<< "$release_version"
+
+            if (( release_major < previous_major ||
+              (release_major == previous_major && release_minor < previous_minor) ||
+              (release_major == previous_major && release_minor == previous_minor && release_patch < previous_patch) )); then
+              echo "::error title=Release version must increase::package.json version $release_version is lower than the previous production version $previous_version."
+              exit 1
+            fi
+          fi
+
+          release_tag="v${release_version}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$release_tag" >/dev/null; then
+            echo "::error title=Release already exists::Tag $release_tag already exists. Bump package.json before merging."
+            exit 1
+          fi
+
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          awk -v heading="## ${release_tag} - " '
+            index($0, heading) == 1 { include = 1; next }
+            include && /^## / { exit }
+            include { print }
+          ' CHANGELOG.md > "$notes_file"
+
+          if [[ ! -s "$notes_file" ]]; then
+            echo "::error title=Missing release notes::Add release notes below the $release_tag heading in CHANGELOG.md."
+            exit 1
+          fi
+
+          {
+            printf 'tag=%s\n' "$release_tag"
+            printf 'notes_file=%s\n' "$notes_file"
+            printf 'publish=true\n'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        if: steps.release.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_NOTES: ${{ steps.release.outputs.notes_file }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Rabbit Automation Action $RELEASE_TAG" \
+            --notes-file "$RELEASE_NOTES"
+
+      - name: Notify Rabbit support
+        if: steps.release.outputs.publish == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_RABBIT_SUPPORT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc \
+            --arg tag "$RELEASE_TAG" \
+            --arg url "$RELEASE_URL" \
+            '{text: ("Rabbit Automation Action " + $tag + " is published. Marketplace action: open " + $url + ", wait for Verify release to pass, then publish to the GitHub Marketplace. Verify the listing and complete the caller canary before moving v1.")}')"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header 'Content-type: application/json' \
+            --data "$payload" \
+            "$SLACK_WEBHOOK"

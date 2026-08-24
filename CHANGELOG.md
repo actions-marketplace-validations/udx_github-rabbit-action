@@ -3,6 +3,12 @@
 All notable changes to this action are recorded here. Versions follow semantic
 versioning; callers should normally use the maintained `v1` major tag.
 
+## v1.0.3 - 2026-08-18
+
+- Added release verification, workflow linting, and a production release
+  workflow that validates and publishes each new semantic version.
+- Enforced ShellCheck error checks and corrected lifecycle-root discovery.
+
 ## v1.0.2 - 2026-08-18
 
 - Made lifecycle resolution and Rabbit configuration merging self-contained.
