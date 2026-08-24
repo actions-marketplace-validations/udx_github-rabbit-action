@@ -6,6 +6,7 @@ on:
       - production
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -103,6 +104,19 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Rabbit Automation Action $RELEASE_TAG" \
             --notes-file "$RELEASE_NOTES"
+
+      - name: Start release verification
+        if: steps.release.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF_NAME" \
+            -f release_tag="$RELEASE_TAG"
 
       - name: Notify Rabbit support
         if: steps.release.outputs.publish == 'true'
