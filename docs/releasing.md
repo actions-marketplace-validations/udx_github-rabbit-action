@@ -9,8 +9,6 @@ The action is released from `production`. Patch releases are immutable
    user-facing notes at the top of `CHANGELOG.md` in the pull request that
    changes action behavior.
 2. Merge the focused, reviewed pull request into `production`.
-3. Test the exact `production` commit from a caller's non-production
-   environment. Use `@production` only for that canary.
 
 The `Publish release` workflow runs after every `production` push. It does
 nothing unless that push changes the `package.json` version; then it runs
@@ -46,16 +44,20 @@ For every release:
 2. Confirm the Marketplace listing shows that version, the current `action.yml`
    metadata, and the current README.
 
-Published-tag verification does not replace the pre-release caller canary or
-the Marketplace listing check.
+Published-tag verification does not replace the caller canary or the
+Marketplace listing check.
 
 ## Promote callers
 
-1. Move the `v1` tag to the tested immutable release commit.
-2. Confirm `v1` and the patch tag resolve to the same commit with
+1. In a caller repository's non-production environment, run a plan using
+   `udx/github-rabbit-action@production`. This caller canary proves the exact
+   release commit works in a real consumer workflow; it must not apply
+   infrastructure.
+2. Move the `v1` tag to the tested immutable release commit.
+3. Confirm `v1` and the patch tag resolve to the same commit with
    `git ls-remote --tags origin 'v1*'`.
-3. Update reusable workflows and callers from `@production` to `@v1`.
-4. Run a non-production caller plan using `@v1` before merging the consumer
+4. Update reusable workflows and callers from `@production` to `@v1`.
+5. Run a non-production caller plan using `@v1` before merging the consumer
    change.
 
 Use a new major tag for breaking input, output, safety, or lifecycle-contract
