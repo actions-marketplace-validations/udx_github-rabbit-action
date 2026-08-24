@@ -9,6 +9,8 @@ branches:
     rules: {}
   - name: chore/publish-versioned-releases
     rules: {}
+  - name: fix/dispatch-release-verification
+    rules: {}
   - name: fix/gcp-credential-mount
     rules: {}
   - name: infra-templates
