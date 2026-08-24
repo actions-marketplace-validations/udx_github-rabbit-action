@@ -15,7 +15,9 @@ The action is released from `production`. Patch releases are immutable
 The `Publish release` workflow runs after every `production` push. It does
 nothing unless that push changes the `package.json` version; then it runs
 `make test`, refuses to reuse an existing tag, and publishes that GitHub
-release from the merged commit. The `Verify release` workflow then validates the published tag.
+release from the merged commit. It explicitly dispatches `Verify release` for
+the published tag, because release events created with `GITHUB_TOKEN` do not
+start other workflows.
 After the GitHub release is created, `#rabbit-support` receives the Marketplace
 handoff through `SLACK_WEBHOOK_RABBIT_SUPPORT`; the message directs the
 operator to wait for verification before publishing to Marketplace.

@@ -9,7 +9,7 @@ branches:
     rules: {}
   - name: chore/publish-versioned-releases
     rules: {}
-  - name: dependabot/github_actions/actions/upload-artifact-7
+  - name: fix/dispatch-release-verification
     rules: {}
   - name: fix/gcp-credential-mount
     rules: {}
@@ -78,11 +78,17 @@ workflows:
         branches:
           - production
     permissions:
+      actions: write
       contents: write
   - path: .github/workflows/release.yml
     triggers:
       release:
         types:
           - published
+      workflow_dispatch:
+        inputs:
+          release_tag:
+            required: true
+            type: string
     permissions:
       contents: read
