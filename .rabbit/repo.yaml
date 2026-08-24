@@ -7,9 +7,7 @@ repository:
 branches:
   - name: chore/action-release-standards
     rules: {}
-  - name: dependabot/github_actions/actions/checkout-7
-    rules: {}
-  - name: dependabot/github_actions/actions/github-script-9
+  - name: chore/publish-versioned-releases
     rules: {}
   - name: dependabot/github_actions/actions/upload-artifact-7
     rules: {}
