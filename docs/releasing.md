@@ -18,9 +18,9 @@ nothing unless that push changes the `package.json` version; then it runs
 release from the merged commit. It explicitly dispatches `Verify release` for
 the published tag, because release events created with `GITHUB_TOKEN` do not
 start other workflows.
-After the GitHub release is created, `#rabbit-support` receives the Marketplace
-handoff through `SLACK_WEBHOOK_RABBIT_SUPPORT`; the message directs the
-operator to wait for verification before publishing to Marketplace.
+After the GitHub release is created, `#rabbit-support` receives a handoff
+through `SLACK_WEBHOOK_RABBIT_SUPPORT` to wait for verification and check the
+Marketplace listing.
 
 `package.json` is the single release-version source. Its semantic version maps
 to the Git tag by adding `v` and must match the first semantic heading in
@@ -28,20 +28,26 @@ to the Git tag by adding `v` and must match the first semantic heading in
 published. A production push creates a release only when this version changes,
 and its version must increase.
 
-## Publish to GitHub Marketplace
+## GitHub Marketplace
 
-1. Confirm the `Verify release` workflow passed for the automatically
-   published semantic GitHub release, for example `v1.0.3`.
-2. Open that release and, in the release form, select **Publish this Action to
-   the GitHub Marketplace**. GitHub requires this UI step and may require 2FA;
-   a release created only through the REST or CLI release API is not enough.
-3. Keep `Deployment` as the primary Marketplace category and `Security` as the
-   secondary category unless the action's public purpose changes.
-4. Verify the Marketplace listing shows the new version, current `action.yml`
-   metadata, and current README before changing any caller references.
+Publishing an action to GitHub Marketplace is a one-time UI setup. This action
+already has a Marketplace listing, so a published versioned release updates the
+existing listing without another manual publishing step.
 
-The published-tag verification does not replace the pre-release caller canary
-or the Marketplace UI verification.
+For the first Marketplace release only, open the release form and select
+**Publish this Action to the GitHub Marketplace**. GitHub may require 2FA.
+Use `Deployment` as the primary category and `Security` as the secondary
+category unless the action's public purpose changes.
+
+For every release:
+
+1. Confirm `Verify release` passed for the published semantic tag, for example
+   `v1.0.4`.
+2. Confirm the Marketplace listing shows that version, the current `action.yml`
+   metadata, and the current README.
+
+Published-tag verification does not replace the pre-release caller canary or
+the Marketplace listing check.
 
 ## Promote callers
 
