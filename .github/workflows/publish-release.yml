@@ -130,7 +130,7 @@ jobs:
           payload="$(jq -nc \
             --arg tag "$RELEASE_TAG" \
             --arg url "$RELEASE_URL" \
-            '{text: (":rocket: Rabbit Automation Action *" + $tag + "* is published.\n" + $url + "\n\nNext:\n• Wait for *Verify release* to pass.\n• Verify Marketplace lists this version.\n• Run a plan-only non-production caller canary with `@production`, then move `v1`.")}')"
+            '{text: (":rocket: Rabbit Automation Action *" + $tag + "* is published.\n" + $url + "\n\nNext:\n• Wait for *Verify release* to pass.\n• Verify Marketplace shows this version and current metadata/README.\n• Run a plan-only non-production caller canary with `@production`, then move `v1`.")}')"
           curl --fail-with-body --silent --show-error \
             --request POST \
             --header 'Content-type: application/json' \
