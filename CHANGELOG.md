@@ -6,7 +6,7 @@ versioning; callers should normally use the maintained `v1` major tag.
 ## v1.0.4 - 2026-08-24
 
 - Clarified the one-time GitHub Marketplace setup and the checks required for
-  each subsequent action release.
+  each subsequent action release. No action runtime behavior changed.
 
 ## v1.0.3 - 2026-08-18
 
