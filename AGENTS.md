@@ -6,9 +6,10 @@ Run `make test` before opening or updating a pull request.
 
 ## Releases
 
-Keep public action changes backward compatible within `v1`. Bump the version
-in `package.json` and add its matching immutable `v1.x.y` entry to
-`CHANGELOG.md` with each release-worthy change; the production release workflow
+Keep public action changes backward compatible within `v1`. Any runtime change
+to `action.yml` or `bin/` is release-worthy. The pull request targeting
+`production` must bump the version in `package.json` and add its matching
+immutable `v1.x.y` entry to `CHANGELOG.md`. The production release workflow
 publishes it after validation and notifies `#rabbit-support` through its
 dedicated repository secret. Confirm the Marketplace UI publication, then move
 the `v1` tag only after caller canary validation. Follow

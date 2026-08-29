@@ -1,6 +1,6 @@
 {
   "name": "@udx/github-rabbit-action",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "private": true,
   "description": "Rabbit Automation Action release manifest",
   "license": "GPL-2.0-only",

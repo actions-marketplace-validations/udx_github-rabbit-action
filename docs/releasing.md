@@ -5,10 +5,14 @@ The action is released from `production`. Patch releases are immutable
 
 ## Prepare a release
 
-1. Bump `package.json` to the next semantic version and add matching concise
-   user-facing notes at the top of `CHANGELOG.md` in the pull request that
-   changes action behavior.
+1. In the pull request targeting `production`, bump `package.json` to the next
+   semantic version and add matching concise user-facing notes at the top of
+   `CHANGELOG.md` for the action behavior changes in that release.
 2. Merge the focused, reviewed pull request into `production`.
+
+CI rejects a production-targeting pull request that changes `action.yml` or
+`bin/` unless its `package.json` version increases. `make test` also requires
+the first semantic heading in `CHANGELOG.md` to match that version.
 
 The `Publish release` workflow runs after every `production` push. It does
 nothing unless that push changes the `package.json` version; then it runs
@@ -49,13 +53,14 @@ Marketplace listing check.
 
 ## Promote callers
 
-1. In a caller repository's non-production environment, run a plan using
-   `udx/github-rabbit-action@production`. This caller canary proves the exact
+1. After the semantic release is published, in a caller repository's
+   non-production environment run a plan using its immutable tag, for example
+   `udx/github-rabbit-action@v1.0.5`. This caller canary proves the exact
    release commit works in a real consumer workflow; it must not apply
    infrastructure.
 2. Move the `v1` tag to the tested immutable release commit.
-3. Confirm `v1` and the patch tag resolve to the same commit with
-   `git ls-remote --tags origin 'v1*'`.
+3. Compare the `v1` and new patch-tag SHAs to confirm they resolve to the same
+   commit: `git ls-remote --tags origin refs/tags/v1 refs/tags/v1.0.5`.
 4. Update reusable workflows and callers from `@production` to `@v1`.
 5. Run a non-production caller plan using `@v1` before merging the consumer
    change.

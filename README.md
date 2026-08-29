@@ -426,7 +426,7 @@ The workflow dispatch inputs provide safe manual control:
 
 ## Authentication and state ownership
 
-The caller workflow owns cloud authentication. Authenticate with Google Cloud before invoking the action; the action mounts the resulting `GOOGLE_APPLICATION_CREDENTIALS` file read-only into the R2A container and never copies it into the workspace. Configure AWS credentials in the caller when the configuration uses AWS; the action forwards the resulting AWS session variables to R2A.
+The caller workflow owns cloud authentication. Authenticate with Google Cloud before invoking the action; the action copies the credential file into a private runner directory, mounts that copy read-only for R2A, then removes it when the step exits. It never changes the caller credential file or copies credentials into the workspace. Configure AWS credentials in the caller when the configuration uses AWS; the action forwards the resulting AWS session variables to R2A.
 
 The optional state-backend inputs are passed through to the IaC engine. Omit them to retain its existing GCS default; provide the backend type, configuration, and state-path key only when the selected backend requires an override.
 
