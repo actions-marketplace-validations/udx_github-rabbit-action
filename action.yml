@@ -551,6 +551,16 @@ runs:
             echo "::error title=GCP credentials unavailable::Resolved credentials file is no longer readable."
             exit 1
           fi
+          # google-github-actions/auth writes the credential file 0600 and the
+          # R2A container runs as the non-root udx user, so the read-only bind
+          # mount is unreadable inside the container. Make it world-readable
+          # only while the container runs, then restore the original mode.
+          credential_mode="$(stat -c '%a' "$GCP_CREDENTIALS_PATH")"
+          restore_credential_mode() {
+            chmod "$credential_mode" "$GCP_CREDENTIALS_PATH" 2>/dev/null || true
+          }
+          trap restore_credential_mode EXIT
+          chmod 0644 "$GCP_CREDENTIALS_PATH"
           gcp_mount=(-v "$GCP_CREDENTIALS_PATH:/tmp/gcp-credentials.json:ro" -e "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-credentials.json")
         fi
 
