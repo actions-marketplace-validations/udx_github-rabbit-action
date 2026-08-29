@@ -13,4 +13,8 @@ rabbit.ci
 
 ## CI
 
-The `ci` workflow runs on pull requests and pushes to `production` and `lifecycle-action-integration`. It installs a pinned `yq` binary and runs `make test`.
+The `ci` workflow runs on pull requests and pushes to `production`. Its action
+contract job installs a pinned `yq` binary and runs `make test`; a separate job
+uses `actionlint` for GitHub Actions workflow linting. On pull requests, a
+release-contract job requires a semantic `package.json` version increase when
+`action.yml` or `bin/` changes.

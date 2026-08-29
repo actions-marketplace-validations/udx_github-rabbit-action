@@ -3,6 +3,11 @@
 All notable changes to this action are recorded here. Versions follow semantic
 versioning; callers should normally use the maintained `v1` major tag.
 
+## v1.0.5 - 2026-08-29
+
+- Mount a temporary private copy of Google Workload Identity credentials so the
+  non-root R2A container can read them without changing the caller file's mode.
+
 ## v1.0.4 - 2026-08-24
 
 - Clarified the one-time GitHub Marketplace setup and the checks required for

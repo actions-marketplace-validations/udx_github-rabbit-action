@@ -552,16 +552,19 @@ runs:
             exit 1
           fi
           # google-github-actions/auth writes the credential file 0600 and the
-          # R2A container runs as the non-root udx user, so the read-only bind
-          # mount is unreadable inside the container. Make it world-readable
-          # only while the container runs, then restore the original mode.
-          credential_mode="$(stat -c '%a' "$GCP_CREDENTIALS_PATH")"
-          restore_credential_mode() {
-            chmod "$credential_mode" "$GCP_CREDENTIALS_PATH" 2>/dev/null || true
+          # R2A container runs as the non-root udx user. Keep the caller's
+          # credential file private and mount a world-readable copy from a
+          # runner-private directory instead.
+          gcp_credentials_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/rabbit-gcp-credentials.XXXXXX")"
+          gcp_credentials_copy="$gcp_credentials_dir/gcp-credentials.json"
+          cleanup_gcp_credentials() {
+            local status=$?
+            rm -rf "$gcp_credentials_dir" || true
+            return "$status"
           }
-          trap restore_credential_mode EXIT
-          chmod 0644 "$GCP_CREDENTIALS_PATH"
-          gcp_mount=(-v "$GCP_CREDENTIALS_PATH:/tmp/gcp-credentials.json:ro" -e "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-credentials.json")
+          trap cleanup_gcp_credentials EXIT
+          install -m 0644 -- "$GCP_CREDENTIALS_PATH" "$gcp_credentials_copy"
+          gcp_mount=(-v "$gcp_credentials_copy:/tmp/gcp-credentials.json:ro" -e "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-credentials.json")
         fi
 
         echo "🐰 Running Rabbit Automation Action..."

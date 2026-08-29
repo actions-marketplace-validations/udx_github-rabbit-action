@@ -112,6 +112,10 @@ assert_eq "$(yq -r '.runs.steps[] | select(.name == "Upload terraform plans") | 
 assert_eq "$(yq -r '[.runs.steps[] | select(.uses == "google-github-actions/auth@v3" or .uses == "aws-actions/configure-aws-credentials@v6")] | length' "$PROJECT_ROOT/action.yml")" "0" "Action does not configure cloud credentials"
 assert_eq "$(grep -c 'Authenticate with Google Cloud before invoking github-rabbit-action' "$PROJECT_ROOT/action.yml")" "1" "Action requires caller-provided GCP credentials"
 assert_eq "$(grep -c 'AWS credentials configured by the caller workflow' "$PROJECT_ROOT/action.yml")" "1" "Action forwards caller AWS credentials"
+assert_eq "$(grep -c 'mktemp -d "\${RUNNER_TEMP:-/tmp}/rabbit-gcp-credentials.XXXXXX"' "$PROJECT_ROOT/action.yml")" "1" "Action stages GCP credentials in a private temporary directory"
+assert_eq "$(grep -c 'install -m 0644 -- "\$GCP_CREDENTIALS_PATH" "\$gcp_credentials_copy"' "$PROJECT_ROOT/action.yml")" "1" "Action mounts a readable credential copy"
+assert_eq "$(grep -c 'rm -rf "\$gcp_credentials_dir"' "$PROJECT_ROOT/action.yml")" "1" "Action removes the staged GCP credential copy"
+assert_eq "$(grep -c 'chmod 0644 "\$GCP_CREDENTIALS_PATH"' "$PROJECT_ROOT/action.yml" || true)" "0" "Action leaves the caller GCP credential mode unchanged"
 
 write_yaml "$SOURCE/production/10-base.yaml" 'services:
   - module: test-module
