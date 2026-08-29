@@ -3,6 +3,12 @@
 All notable changes to this action are recorded here. Versions follow semantic
 versioning; callers should normally use the maintained `v1` major tag.
 
+## v1.0.6 - 2026-08-29
+
+- Default `shared_project` to `project_id` so Kubernetes modules look up the
+  kubeconfig secret in the caller's own project unless told otherwise.
+- Document the `k8s-config-<cluster>-<namespace>` kubeconfig secret contract.
+
 ## v1.0.5 - 2026-08-29
 
 - Mount a temporary private copy of Google Workload Identity credentials so the
