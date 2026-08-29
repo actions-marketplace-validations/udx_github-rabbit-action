@@ -5,14 +5,14 @@ The action is released from `production`. Patch releases are immutable
 
 ## Prepare a release
 
-1. Bump `package.json` to the next semantic version and add matching concise
-   user-facing notes at the top of `CHANGELOG.md` in the pull request that
-   changes action behavior.
+1. In the pull request targeting `production`, bump `package.json` to the next
+   semantic version and add matching concise user-facing notes at the top of
+   `CHANGELOG.md` for the action behavior changes in that release.
 2. Merge the focused, reviewed pull request into `production`.
 
-Pull-request CI rejects a change to `action.yml` or `bin/` unless its
-`package.json` version increases. `make test` also requires the first semantic
-heading in `CHANGELOG.md` to match that version.
+CI rejects a production-targeting pull request that changes `action.yml` or
+`bin/` unless its `package.json` version increases. `make test` also requires
+the first semantic heading in `CHANGELOG.md` to match that version.
 
 The `Publish release` workflow runs after every `production` push. It does
 nothing unless that push changes the `package.json` version; then it runs

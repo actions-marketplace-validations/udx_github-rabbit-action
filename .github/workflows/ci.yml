@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RELEASE_BRANCH: production
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -40,7 +43,7 @@ jobs:
         run: make test
 
       - name: Require a version bump for runtime changes
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.base_ref == env.RELEASE_BRANCH
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
