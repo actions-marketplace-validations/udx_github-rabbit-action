@@ -46,7 +46,7 @@ inputs:
     required: false
     default: "false"
   shared_project:
-    description: "Shared GCP project for cross-project K8s cluster access"
+    description: "GCP project that holds the k8s-config-<cluster>-<namespace> kubeconfig secret for Kubernetes modules (default: project_id)"
     required: false
 
   # Kubernetes
@@ -523,7 +523,7 @@ runs:
         NEWRELIC_API_KEY: ${{ inputs.newrelic_api_key }}
         DOCKERHUB_USERNAME: ${{ inputs.dockerhub_username }}
         DOCKERHUB_TOKEN: ${{ inputs.dockerhub_helm_token || inputs.dockerhub_token }}
-        SHARED_PROJECT: ${{ inputs.shared_project }}
+        SHARED_PROJECT: ${{ inputs.shared_project || inputs.project_id }}
         STATE_BACKEND: ${{ inputs.state_backend }}
         STATE_BACKEND_CONFIG: ${{ inputs.state_backend_config }}
         STATE_PREFIX_KEY: ${{ inputs.state_prefix_key }}

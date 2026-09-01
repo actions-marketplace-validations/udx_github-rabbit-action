@@ -381,6 +381,18 @@ For monorepo or multi-repo setups where multiple repositories share infrastructu
 
 This isolates Terraform state per repository while allowing shared GCP project access.
 
+### Kubernetes Modules
+
+The `k8s-*` modules read the cluster kubeconfig from a Secret Manager secret
+named `k8s-config-<cluster>-<namespace>` in `shared_project` (defaults to
+`project_id`). Before deploying Kubernetes resources:
+
+1. Create the secret `k8s-config-<k8s_cluster_name>-<namespace>` containing a
+   kubeconfig for the target cluster and namespace.
+2. Grant the deploy service account `roles/secretmanager.secretAccessor` on it.
+3. Set `shared_project` only if that secret lives in a different GCP project
+   than `project_id`.
+
 ### Pinning R2A Version
 
 Always pin to a specific version for reproducible builds:
@@ -446,7 +458,7 @@ The optional state-backend inputs are passed through to the IaC engine. Omit the
 | `environment` | — | auto | Override environment |
 | `print_config` | — | `true` | Debug config output |
 | `multi_repo` | — | `false` | Per-repo state isolation |
-| `shared_project` | — | — | Shared GCP project |
+| `shared_project` | — | `project_id` | GCP project holding the `k8s-config-<cluster>-<namespace>` kubeconfig secret |
 | `k8s_cluster_name` | — | — | GKE cluster name |
 | `newrelic_account_id` | — | — | New Relic account ID |
 | `newrelic_api_key` | — | — | New Relic API key |
