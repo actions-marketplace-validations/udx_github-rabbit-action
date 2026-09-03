@@ -1,0 +1,10 @@
+{
+  "name": "@udx/github-rabbit-action",
+  "version": "1.0.6",
+  "private": true,
+  "description": "Rabbit Automation Action release manifest",
+  "license": "GPL-2.0-only",
+  "scripts": {
+    "test": "make test"
+  }
+}

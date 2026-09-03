@@ -9,23 +9,8 @@ branding:
 inputs:
   # Required
   project_id:
-    description: "GCP project ID for Terraform state and resource operations"
+    description: "Project identifier for Terraform state and resource operations"
     required: true
-  gcp_auth_provider:
-    description: "GCP Workload Identity Federation provider resource name"
-    required: true
-  gcp_service_account:
-    description: "GCP service account email for Workload Identity"
-    required: true
-
-  # Auth
-  aws_role_arn:
-    description: "AWS IAM OIDC role ARN for Route53, CloudFront, WAF, ACM"
-    required: false
-  aws_region:
-    description: "AWS region"
-    required: false
-
   # Docker
   dockerhub_username:
     description: "Docker Hub username for pulling R2A image"
@@ -61,7 +46,7 @@ inputs:
     required: false
     default: "false"
   shared_project:
-    description: "Shared GCP project for cross-project K8s cluster access"
+    description: "GCP project that holds the k8s-config-<cluster>-<namespace> kubeconfig secret for Kubernetes modules (default: project_id)"
     required: false
 
   # Kubernetes
@@ -82,13 +67,27 @@ inputs:
     description: "Slack incoming webhook URL for deployment notifications"
     required: false
 
+  # State backend
+  state_backend:
+    description: "Optional state backend override passed to the IaC engine (for example s3, azurerm, http, or consul); omit to use the container default (GCS)"
+    required: false
+  state_backend_config:
+    description: "Optional backend configuration as key=value lines"
+    required: false
+  state_prefix_key:
+    description: "Optional backend configuration key for the state path (for example prefix or key)"
+    required: false
+
   # Config
   source_dir:
     description: "Source directory for .rabbit configs"
     required: false
     default: ".rabbit"
+  lifecycle_policy_path:
+    description: "Optional caller-repository lifecycle policy path; defaults to the bundled policy"
+    required: false
   github_token:
-    description: "GitHub token for branch protection detection and PR comments"
+    description: "GitHub token passed to lifecycle resolution and used for PR comments"
     required: false
     default: ${{ github.token }}
 
@@ -98,7 +97,16 @@ outputs:
     value: ${{ steps.resolve-env.outputs.environment }}
   lifecycle:
     description: "Resolved lifecycle (production, staging, development)"
-    value: ${{ steps.merge-configs.outputs.lifecycle }}
+    value: ${{ steps.resolve-env.outputs.lifecycle }}
+  is_protected:
+    description: "Whether GitHub reported the resolved environment branch as protected"
+    value: ${{ steps.resolve-lifecycle.outputs.is_protected }}
+  resolution_reason:
+    description: "Lifecycle rule that selected the lifecycle"
+    value: ${{ steps.resolve-lifecycle.outputs.resolution_reason }}
+  lifecycle_policy_path:
+    description: "Lifecycle policy path used for resolution and config merging"
+    value: ${{ steps.resolve-lifecycle.outputs.lifecycle_policy_path }}
   plan_only:
     description: "Whether the run was plan-only"
     value: ${{ steps.plan-mode.outputs.plan_only }}
@@ -125,29 +133,55 @@ runs:
   using: "composite"
   steps:
     # =========================================================================
-    # 1. Install yq
+    # 1. Install pinned yq
     # =========================================================================
-    - name: Install yq
+    - name: Install pinned yq
       shell: bash
       run: |
         set -euo pipefail
-        if ! command -v yq >/dev/null 2>&1; then
-          echo "Installing yq..."
-          curl -sSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" -o /usr/local/bin/yq
-          chmod +x /usr/local/bin/yq
-        fi
+        version="v4.44.3"
+        sha256="a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7"
+        install_dir="${RUNNER_TEMP:-/tmp}/rabbit-action-bin"
+        mkdir -p "$install_dir"
+
+        url="https://github.com/mikefarah/yq/releases/download/${version}/yq_linux_amd64"
+        curl -fsSL "$url" -o "$install_dir/yq"
+        printf '%s  %s\n' "$sha256" "$install_dir/yq" | sha256sum --check --status
+        chmod +x "$install_dir/yq"
+        echo "$install_dir" >> "$GITHUB_PATH"
+        export PATH="$install_dir:$PATH"
         yq --version
 
     # =========================================================================
-    # 2. Merge infrastructure configs
+    # 2. Resolve Rabbit lifecycle
+    # =========================================================================
+    - name: Resolve Rabbit lifecycle
+      id: resolve-lifecycle
+      shell: bash
+      env:
+        INPUT_SOURCE_DIR: ${{ inputs.source_dir }}
+        INPUT_LIFECYCLE_POLICY_PATH: ${{ inputs.lifecycle_policy_path }}
+        INPUT_ENV_NAME: ${{ inputs.environment || (github.event_name == 'pull_request' && github.base_ref) || (github.event_name == 'delete' && github.event.ref) || github.ref_name }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        ENABLE_ANNOTATIONS: "false"
+        INPUT_DEBUG: "false"
+      run: |
+        set -euo pipefail
+        bash "${GITHUB_ACTION_PATH}/bin/resolve-lifecycle.sh"
+
+    # =========================================================================
+    # 3. Merge infrastructure configs
     # =========================================================================
     - name: Merge infrastructure configs
       id: merge-configs
       shell: bash
       env:
         INPUT_SOURCE_DIR: ${{ inputs.source_dir }}
-        INPUT_ENV_NAME: ${{ inputs.environment || (github.event_name == 'pull_request' && github.base_ref) || (github.event_name == 'delete' && github.event.ref) || github.ref_name }}
-        GITHUB_TOKEN: ${{ inputs.github_token }}
+        INPUT_LIFECYCLE_POLICY_PATH: ${{ inputs.lifecycle_policy_path }}
+        INPUT_ENV_NAME: ${{ steps.resolve-lifecycle.outputs.environment }}
+        INPUT_LIFECYCLE: ${{ steps.resolve-lifecycle.outputs.lifecycle }}
+        INPUT_IS_PROTECTED: ${{ steps.resolve-lifecycle.outputs.is_protected }}
+        INPUT_RESOLUTION_REASON: ${{ steps.resolve-lifecycle.outputs.resolution_reason }}
         INPUT_EXCLUDE: "**/merged*.yml,**/merged*.yaml"
         INPUT_RECURSIVE: "true"
         INPUT_FILE_PATTERNS: "*.yml,*.yaml"
@@ -160,7 +194,7 @@ runs:
         bash "${GITHUB_ACTION_PATH}/bin/merge-configs.sh"
 
     # =========================================================================
-    # 3. Resolve environment
+    # 4. Resolve environment
     # =========================================================================
     - name: Resolve environment
       id: resolve-env
@@ -169,13 +203,15 @@ runs:
         MERGED_ENV: ${{ steps.merge-configs.outputs.environment }}
         MERGED_LIFECYCLE: ${{ steps.merge-configs.outputs.lifecycle }}
         MERGED_CONFIG_PATH: ${{ steps.merge-configs.outputs.merged_config }}
+        RESOLVED_ENV: ${{ steps.resolve-lifecycle.outputs.environment }}
+        RESOLVED_LIFECYCLE: ${{ steps.resolve-lifecycle.outputs.lifecycle }}
         EVENT_NAME: ${{ github.event_name }}
         EVENT_REF_TYPE: ${{ github.event.ref_type }}
         REQUESTED_ENV: ${{ inputs.environment || (github.event_name == 'pull_request' && github.base_ref) || (github.event_name == 'delete' && github.event.ref) || github.ref_name }}
       run: |
         set -euo pipefail
-        environment="$MERGED_ENV"
-        lifecycle="$MERGED_LIFECYCLE"
+        environment="${RESOLVED_ENV:-$MERGED_ENV}"
+        lifecycle="${RESOLVED_LIFECYCLE:-$MERGED_LIFECYCLE}"
 
         if [[ "$EVENT_NAME" == "delete" && "$EVENT_REF_TYPE" == "branch" && -n "$REQUESTED_ENV" && "$environment" != "$REQUESTED_ENV" ]]; then
           echo "::error title=❌ Environment Resolution Mismatch::Delete requested '$REQUESTED_ENV' but resolved '$environment'. Aborting to prevent wrong-environment destroy."
@@ -191,7 +227,7 @@ runs:
         echo "Config path: $MERGED_CONFIG_PATH"
 
     # =========================================================================
-    # 4. Determine plan mode
+    # 5. Determine plan mode
     # =========================================================================
     - name: Determine plan mode
       id: plan-mode
@@ -223,7 +259,7 @@ runs:
         fi
 
     # =========================================================================
-    # 5. Determine terraform action
+    # 6. Determine terraform action
     # =========================================================================
     - name: Determine terraform action
       id: terraform-action
@@ -253,13 +289,14 @@ runs:
         echo "Terraform action: $terraform_action"
 
     # =========================================================================
-    # 6. Safety checks
+    # 7. Safety checks
     # =========================================================================
     - name: Safety checks
       id: safety
       shell: bash
       env:
         LIFECYCLE: ${{ steps.resolve-env.outputs.lifecycle }}
+        LIFECYCLE_POLICY_PATH: ${{ steps.resolve-lifecycle.outputs.lifecycle_policy_path }}
         PLAN_ONLY: ${{ steps.plan-mode.outputs.plan_only }}
         TERRAFORM_ACTION: ${{ steps.terraform-action.outputs.terraform_action }}
         EVENT_NAME: ${{ github.event_name }}
@@ -289,7 +326,7 @@ runs:
         echo "should_deploy=true" >> "$GITHUB_OUTPUT"
 
     # =========================================================================
-    # 7. Resolve deployment metadata
+    # 8. Resolve deployment metadata
     # =========================================================================
     - name: Resolve deployment metadata
       id: deployment-metadata
@@ -305,7 +342,7 @@ runs:
         echo "K8s namespace: $namespace"
 
     # =========================================================================
-    # 8. Detect config services for summary
+    # 9. Detect config services for summary
     # =========================================================================
     - name: Detect configured services
       id: detect-services
@@ -345,7 +382,7 @@ runs:
         echo "detected_configs=$detected_configs" >> "$GITHUB_OUTPUT"
 
     # =========================================================================
-    # 9. Write configuration summary
+    # 10. Write configuration summary
     # =========================================================================
     - name: Write configuration summary
       if: always()
@@ -361,9 +398,13 @@ runs:
         TRIGGER: ${{ github.event_name }}
         R2A_VERSION: ${{ inputs.r2a_version }}
         MULTI_REPO: ${{ inputs.multi_repo }}
-        HAS_AWS: ${{ inputs.aws_role_arn != '' && inputs.aws_region != '' }}
+        LIFECYCLE_POLICY_PATH: ${{ steps.resolve-lifecycle.outputs.lifecycle_policy_path }}
       run: |
         config_items="$(printf '%s' "${DETECTED_CONFIGS:-none}" | sed "s/#{Environment}/$ENV_NAME/g" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | sed '/^$/d')"
+        aws_credentials_available=false
+        if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
+          aws_credentials_available=true
+        fi
 
         {
           echo "## Configuration Summary"
@@ -377,9 +418,10 @@ runs:
           echo "| Field | Value |"
           echo "| --- | --- |"
           echo "| Lifecycle | \`${LIFECYCLE:-unknown}\` |"
+          echo "| Lifecycle Policy | \`${LIFECYCLE_POLICY_PATH:-bundled}\` |"
           echo "| Plan Only | \`${PLAN_ONLY:-true}\` |"
           echo "| Multi Repo | \`${MULTI_REPO:-false}\` |"
-          echo "| AWS Enabled | \`${HAS_AWS}\` |"
+          echo "| AWS runner credentials | \`${aws_credentials_available}\` |"
           echo ""
           echo "### Detected Configs"
           echo ""
@@ -401,28 +443,7 @@ runs:
         } >> "$GITHUB_STEP_SUMMARY"
 
     # =========================================================================
-    # 10. Authenticate with Google Cloud
-    # =========================================================================
-    - name: Authenticate with Google Cloud
-      id: gcp-auth
-      if: steps.safety.outputs.should_deploy == 'true'
-      uses: google-github-actions/auth@v3
-      with:
-        workload_identity_provider: ${{ inputs.gcp_auth_provider }}
-        service_account: ${{ inputs.gcp_service_account }}
-
-    # =========================================================================
-    # 11. Configure AWS credentials (optional)
-    # =========================================================================
-    - name: Configure AWS credentials
-      if: steps.safety.outputs.should_deploy == 'true' && inputs.aws_role_arn != '' && inputs.aws_region != ''
-      uses: aws-actions/configure-aws-credentials@v6
-      with:
-        role-to-assume: ${{ inputs.aws_role_arn }}
-        aws-region: ${{ inputs.aws_region }}
-
-    # =========================================================================
-    # 12. Prepare artifacts directory
+    # 11. Prepare artifacts directory
     # =========================================================================
     - name: Prepare artifacts directory
       if: steps.safety.outputs.should_deploy == 'true'
@@ -432,22 +453,31 @@ runs:
         chmod -R 777 terraform/plans
 
     # =========================================================================
-    # 13. Prepare GCP credentials for Docker volume mount
+    # 12. Resolve caller-provided GCP credentials for a read-only Docker mount
     # =========================================================================
-    - name: Prepare Workload Identity credentials
+    - name: Resolve GCP credentials
       id: prepare-creds
       if: steps.safety.outputs.should_deploy == 'true'
       shell: bash
-      env:
-        CRED_FILE_PATH: ${{ steps.gcp-auth.outputs.credentials_file_path }}
       run: |
         set -euo pipefail
-        cp "$CRED_FILE_PATH" gcp-credentials.json
-        chmod 644 gcp-credentials.json
-        echo "credentials_path=$(pwd)/gcp-credentials.json" >> "$GITHUB_OUTPUT"
+
+        credentials_path="${GOOGLE_APPLICATION_CREDENTIALS:-}"
+        if [[ -z "$credentials_path" ]]; then
+          echo "::error title=GCP credentials unavailable::Authenticate with Google Cloud before invoking github-rabbit-action."
+          exit 1
+        fi
+
+        if [[ ! -f "$credentials_path" ]]; then
+          echo "::error title=GCP credentials unavailable::GOOGLE_APPLICATION_CREDENTIALS does not point to a readable file."
+          exit 1
+        fi
+
+        echo "gcp_credentials_available=true" >> "$GITHUB_OUTPUT"
+        echo "credentials_path=$credentials_path" >> "$GITHUB_OUTPUT"
 
     # =========================================================================
-    # 14. Docker login and pull R2A image
+    # 13. Docker login and pull R2A image
     # =========================================================================
     - name: Docker login and pull R2A image
       if: steps.safety.outputs.should_deploy == 'true'
@@ -470,7 +500,7 @@ runs:
         echo "✓ Image pulled successfully"
 
     # =========================================================================
-    # 15. Run Rabbit Automation Action (Terraform engine)
+    # 14. Run Rabbit Automation Action (Terraform engine)
     # =========================================================================
     - name: Run Rabbit Automation Action
       id: terraform
@@ -493,7 +523,12 @@ runs:
         NEWRELIC_API_KEY: ${{ inputs.newrelic_api_key }}
         DOCKERHUB_USERNAME: ${{ inputs.dockerhub_username }}
         DOCKERHUB_TOKEN: ${{ inputs.dockerhub_helm_token || inputs.dockerhub_token }}
-        SHARED_PROJECT: ${{ inputs.shared_project }}
+        SHARED_PROJECT: ${{ inputs.shared_project || inputs.project_id }}
+        STATE_BACKEND: ${{ inputs.state_backend }}
+        STATE_BACKEND_CONFIG: ${{ inputs.state_backend_config }}
+        STATE_PREFIX_KEY: ${{ inputs.state_prefix_key }}
+        GCP_CREDENTIALS_AVAILABLE: ${{ steps.prepare-creds.outputs.gcp_credentials_available }}
+        GCP_CREDENTIALS_PATH: ${{ steps.prepare-creds.outputs.credentials_path }}
         REPO_OWNER: ${{ github.repository_owner }}
         REPO_NAME: ${{ github.event.repository.name }}
       run: |
@@ -501,18 +536,35 @@ runs:
         IMAGE="usabilitydynamics/rabbit-automation-action:${R2A_VERSION}"
         ARTIFACTS_PATH="terraform/plans"
 
-        # Build AWS env vars (may be empty if AWS not configured)
+        # Forward AWS credentials configured by the caller workflow.
         aws_env=()
         if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
           aws_env+=(-e "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}")
-          aws_env+=(-e "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}")
-          aws_env+=(-e "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}")
+          aws_env+=(-e "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}")
+          aws_env+=(-e "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}")
           aws_env+=(-e "AWS_REGION=${AWS_REGION:-}")
-        else
-          aws_env+=(-e "AWS_ACCESS_KEY_ID=")
-          aws_env+=(-e "AWS_SECRET_ACCESS_KEY=")
-          aws_env+=(-e "AWS_SESSION_TOKEN=")
-          aws_env+=(-e "AWS_REGION=")
+        fi
+
+        gcp_mount=()
+        if [[ "$GCP_CREDENTIALS_AVAILABLE" == "true" ]]; then
+          if [[ ! -f "$GCP_CREDENTIALS_PATH" ]]; then
+            echo "::error title=GCP credentials unavailable::Resolved credentials file is no longer readable."
+            exit 1
+          fi
+          # google-github-actions/auth writes the credential file 0600 and the
+          # R2A container runs as the non-root udx user. Keep the caller's
+          # credential file private and mount a world-readable copy from a
+          # runner-private directory instead.
+          gcp_credentials_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/rabbit-gcp-credentials.XXXXXX")"
+          gcp_credentials_copy="$gcp_credentials_dir/gcp-credentials.json"
+          cleanup_gcp_credentials() {
+            local status=$?
+            rm -rf "$gcp_credentials_dir" || true
+            return "$status"
+          }
+          trap cleanup_gcp_credentials EXIT
+          install -m 0644 -- "$GCP_CREDENTIALS_PATH" "$gcp_credentials_copy"
+          gcp_mount=(-v "$gcp_credentials_copy:/tmp/gcp-credentials.json:ro" -e "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-credentials.json")
         fi
 
         echo "🐰 Running Rabbit Automation Action..."
@@ -537,7 +589,10 @@ runs:
           -e "DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME:-}" \
           -e "DOCKERHUB_TOKEN=${DOCKERHUB_TOKEN:-}" \
           -e "SHARED_PROJECT=${SHARED_PROJECT:-}" \
-          -e "GOOGLE_APPLICATION_CREDENTIALS=/github/workspace/gcp-credentials.json" \
+          -e "STATE_BACKEND=${STATE_BACKEND:-}" \
+          -e "STATE_BACKEND_CONFIG=${STATE_BACKEND_CONFIG:-}" \
+          -e "STATE_PREFIX_KEY=${STATE_PREFIX_KEY:-}" \
+          ${gcp_mount[@]+"${gcp_mount[@]}"} \
           "${aws_env[@]}" \
           "$IMAGE" \
           /usr/local/bin/entrypoint.sh
@@ -564,19 +619,19 @@ runs:
         echo "aws_cloudfront_distribution_id=${cloudfront_distribution_id}" >> "$GITHUB_OUTPUT"
 
     # =========================================================================
-    # 16. Upload terraform artifacts
+    # 18. Upload terraform artifacts
     # =========================================================================
     - name: Upload terraform artifacts
       if: steps.safety.outputs.should_deploy == 'true'
       continue-on-error: true
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: terraform-artifacts-${{ steps.resolve-env.outputs.environment }}
         path: terraform/plans
         if-no-files-found: warn
 
     # =========================================================================
-    # 17. Render plan summary
+    # 19. Render plan summary
     # =========================================================================
     - name: Render plan summary
       id: plan-summary
@@ -625,7 +680,7 @@ runs:
         bash "${GITHUB_ACTION_PATH}/bin/render-plan-summary.sh" "$summary_file" "$ARTIFACTS_PATH/plan-summary.md"
 
     # =========================================================================
-    # 18. Write deployment summary
+    # 20. Write deployment summary
     # =========================================================================
     - name: Write deployment summary
       if: always() && steps.safety.outputs.should_deploy == 'true'
@@ -669,11 +724,11 @@ runs:
         fi
 
     # =========================================================================
-    # 19. Post PR comment with plan summary
+    # 21. Post PR comment with plan summary
     # =========================================================================
     - name: Post PR comment with plan summary
       if: github.event_name == 'pull_request' && steps.plan-summary.outputs.has_changes == 'true'
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         PLAN_SUMMARY_MD: "terraform/plans/plan-summary.md"
         TOTAL_DESTROY: ${{ steps.plan-summary.outputs.total_destroy }}
@@ -730,19 +785,19 @@ runs:
           }
 
     # =========================================================================
-    # 20. Upload terraform plan files
+    # 22. Upload terraform plan files
     # =========================================================================
     - name: Upload terraform plans
       if: steps.plan-summary.outputs.has_changes == 'true'
       continue-on-error: true
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: terraform-plans-${{ steps.resolve-env.outputs.environment }}
         path: terraform/plans/*.tfplan
         if-no-files-found: ignore
 
     # =========================================================================
-    # 21. Send Slack notification
+    # 23. Send Slack notification
     # =========================================================================
     - name: Send Slack notification
       if: always() && inputs.slack_webhook != '' && (steps.plan-summary.outputs.has_changes == 'true' || steps.terraform.outcome == 'failure' || steps.safety.outcome == 'failure')

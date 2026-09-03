@@ -64,22 +64,9 @@ _require_non_empty() {
     return 0
 }
 
-_require_not_equal() {
-    local left="$1"
-    local right="$2"
-    local message="$3"
-
-    if [[ "$left" == "$right" ]]; then
-        err "$message"
-        return 1
-    fi
-
-    return 0
-}
-
 _validation_check_policy() {
     if [[ ! -f "$LIFECYCLE_POLICY_FILE" ]]; then
-        err "Lifecycle policy file not found: $LIFECYCLE_POLICY_FILE"
+        err "Rabbit config layout file not found: $LIFECYCLE_POLICY_FILE"
         return 1
     fi
 
@@ -107,11 +94,11 @@ _validation_check_policy() {
     protected_lifecycle="${policy_meta[5]:-}"
     fallback_lifecycle="${policy_meta[6]:-}"
 
-    if ! _require_equal "$kind" "lifecyclePolicy" "Lifecycle policy kind must be 'lifecyclePolicy', got '$kind'"; then
+    if ! _require_equal "$kind" "rabbitConfigLayout" "Rabbit config layout kind must be 'rabbitConfigLayout', got '$kind'"; then
         return 1
     fi
 
-    if ! _require_non_empty "$version" "Lifecycle policy must define a version"; then
+    if ! _require_non_empty "$version" "Rabbit config layout must define a version"; then
         return 1
     fi
 
@@ -133,7 +120,8 @@ _validation_check_policy() {
         return 1
     fi
 
-    if ! _require_not_equal "$protected_lifecycle" "$fallback_lifecycle" "Protected lifecycle and fallback lifecycle must be different"; then
+    if [[ "$protected_lifecycle" == "$fallback_lifecycle" ]]; then
+        err "Protected lifecycle and fallback lifecycle must be different"
         return 1
     fi
 
